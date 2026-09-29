@@ -371,20 +371,39 @@ def parse_layer_features(features_text, is_silkscreen=False):
             else:
                 rects.extend([x, y, round(sym["w"], 2), round(sym["h"], 2), round(angle, 1)])
 
-        elif cmd == "T" and len(toks) >= 8 and is_silkscreen:
-            # Suppress T records on copper signal layers, extract only on verified silkscreen
+        elif cmd == "T" and is_silkscreen:
+            # Extract physical silkscreen text, normalizing height to mm and resolving rotation
             try:
-                x = round(float(toks[1]) * coord_scale, 2)
-                y = round(float(toks[2]) * coord_scale, 2)
-                rot = round(float(toks[5]), 1) if len(toks) > 5 and toks[5].replace(".", "", 1).lstrip("-").isdigit() else 0.0
-                mir = 1 if (len(toks) > 6 and toks[6].upper() == "Y") else 0
-                raw_h = float(toks[8])
-                h = round(raw_h * 0.0254, 3) if raw_h > 10.0 else round(raw_h * coord_scale, 3)
-
                 m_txt = re.search(r"['\"](.*?)['\"]", line)
-                text_str = m_txt.group(1) if m_txt else toks[-1].strip("';\"")
-                if text_str and 0.35 <= h <= 6.0:
-                    texts.append([x, y, text_str, h, rot, mir])
+                if m_txt:
+                    text_str = m_txt.group(1)
+                    before = line[:m_txt.start()].split()
+                    if len(before) >= 3:
+                        x = round(float(before[1]) * coord_scale, 2)
+                        y = round(float(before[2]) * coord_scale, 2)
+
+                        # Rotation angle (typically token 6 or 5)
+                        rot = 0.0
+                        if len(before) > 6 and before[6].replace(".", "", 1).lstrip("-").isdigit():
+                            rot = ((float(before[6]) % 360) + 360) % 360
+                        elif len(before) > 5 and before[5].replace(".", "", 1).lstrip("-").isdigit():
+                            val = float(before[5])
+                            if abs(val) > 10 or val == 0:
+                                rot = ((val % 360) + 360) % 360
+
+                        # Height (typically token 8 or 7)
+                        h = 1.0
+                        for cand in (before[8] if len(before) > 8 else None, before[7] if len(before) > 7 else None):
+                            if cand and cand.replace(".", "", 1).lstrip("-").isdigit():
+                                raw_h = float(cand)
+                                if raw_h > 0:
+                                    h_val = raw_h * 0.0254 if raw_h > 10.0 else raw_h * coord_scale
+                                    if 0.15 <= h_val <= 15.0:
+                                        h = round(h_val, 3)
+                                        break
+
+                        mir = 1 if ("Y" in before or "M" in before) else 0
+                        texts.append([x, y, text_str, h, round(rot, 1), mir])
             except Exception:
                 pass
 
@@ -653,9 +672,13 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
                 pins = []
                 is_tp = ref.upper().startswith("TP")
 
+                pxc = 0.0
+                pyc = 0.0
                 if pkg and pkg["w"] > 0.1 and pkg["h"] > 0.1:
                     pw = pkg["w"]
                     ph = pkg["h"]
+                    pxc = pkg.get("xc", 0.0)
+                    pyc = pkg.get("yc", 0.0)
                     pins = pkg["pins"]
                 else:
                     rf = ref.upper()
@@ -681,10 +704,15 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
                 for p in pins:
                     formatted_pins.append([p["n"], p["x"], p["y"], p["w"], p["h"]])
 
-                # Check if component qualifies as Large IC (>= 3.5mm or U... / TR...)
-                is_large_ic = not is_tp and (pw >= 3.5 or ph >= 3.5 or ref.upper().startswith("U") or ref.upper().startswith("TR"))
+                # Check if component qualifies as Large IC:
+                # Must be an actual IC / semiconductor (U..., TR..., Q..., IC...),
+                # or semiconductor-like chip >= 3.5mm, excluding passives (R, C, L, D) and connectors (J, P, H, FID, MK)
+                rf = ref.upper()
+                is_ic = rf.startswith(("U", "TR", "Q", "IC"))
+                is_non_passive = not rf.startswith(("R", "C", "L", "D", "J", "P", "H", "TP", "FID", "MK", "MH", "W"))
+                is_large_ic = not is_tp and (is_ic or (is_non_passive and (pw >= 3.5 or ph >= 3.5))) and max(pw, ph) <= 45.0
 
-                # Compact array structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic]
+                # Compact array structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic, pxc, pyc]
                 components.append([
                     ref,
                     round(x, 2),
@@ -697,7 +725,9 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
                     part,
                     formatted_pins,
                     1 if is_tp else 0,
-                    1 if is_large_ic else 0
+                    1 if is_large_ic else 0,
+                    round(pxc, 2),
+                    round(pyc, 2)
                 ])
             except Exception:
                 continue
@@ -1323,7 +1353,7 @@ function render() {{
     if (layer.surfacePath) {{
       const isCopper = layer.type === 'SIGNAL';
       ctx.globalAlpha = isCopper ? 0.72 : 0.95;
-      ctx.fill(layer.surfacePath);
+      ctx.fill(layer.surfacePath, 'evenodd');
       ctx.globalAlpha = 1.0;
     }}
 
@@ -1387,6 +1417,8 @@ function render() {{
       const ref = cmp[0];
       const isTP = cmp[10] === 1;
       const isLargeIC = cmp[11] === 1;
+      const pxc = cmp[12] || 0;
+      const pyc = cmp[13] || 0;
       const isTarget = searchTarget && ref.toLowerCase() === searchTarget.toLowerCase();
 
       ctx.save();
@@ -1401,7 +1433,7 @@ function render() {{
           // Fill inside circle
           ctx.fillStyle = isTarget ? '#ff2222' : '#e0f7fa';
           ctx.beginPath();
-          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
           ctx.fill();
 
           // Border outline
@@ -1413,15 +1445,16 @@ function render() {{
           const screenD = r * 2 * scale;
           if (screenD >= 16 || isTarget) {{
             ctx.save();
+            ctx.translate(pxc, pyc);
             ctx.scale(mirrorX ? -1 : 1, -1);
-            const maxFontPx = Math.min((screenD * 0.82) / (ref.length * 0.6), screenD * 0.38);
-            if (maxFontPx >= 7.0 || isTarget) {{
-              ctx.font = `bold ${{Math.max(Math.min(maxFontPx, 16), 7.0)}}px monospace`;
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-              ctx.fillStyle = isTarget ? '#ffffff' : '#00363a';
-              ctx.fillText(ref, 0, 0);
-            }}
+            const fontMm = Math.min((r * 2 * 0.82) / (ref.length * 0.6), r * 0.75, 1.2);
+            const FONT_RES = 64;
+            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = isTarget ? '#ffffff' : '#00363a';
+            ctx.fillText(ref, 0, 0);
             ctx.restore();
           }}
         }}
@@ -1432,7 +1465,7 @@ function render() {{
         // Rectangular Courtyard Outline in Electric Cyan (#00e5ff)
         ctx.strokeStyle = isTarget ? '#ff2222' : compConfig.colorPkg;
         ctx.lineWidth = Math.max(isTarget ? 0.25 : 0.12, 1.2 / scale);
-        ctx.strokeRect(-cw / 2, -ch / 2, cw, ch);
+        ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
 
         const pins = cmp[9];
         if (pins && pins.length > 0) {{
@@ -1458,23 +1491,23 @@ function render() {{
           if (cw >= ch) {{
             ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
             ctx.strokeStyle = '#ff2222';
-            ctx.fillRect(-cw / 2 + 0.05, -ph / 2, pw, ph);
-            ctx.strokeRect(-cw / 2 + 0.05, -ph / 2, pw, ph);
+            ctx.fillRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
+            ctx.strokeRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
 
             ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
             ctx.strokeStyle = '#00e5ff';
-            ctx.fillRect(cw / 2 - pw - 0.05, -ph / 2, pw, ph);
-            ctx.strokeRect(cw / 2 - pw - 0.05, -ph / 2, pw, ph);
+            ctx.fillRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
+            ctx.strokeRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
           }} else {{
             ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
             ctx.strokeStyle = '#ff2222';
-            ctx.fillRect(-pw / 2, ch / 2 - ph - 0.05, pw, ph);
-            ctx.strokeRect(-pw / 2, ch / 2 - ph - 0.05, pw, ph);
+            ctx.fillRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
+            ctx.strokeRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
 
             ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
             ctx.strokeStyle = '#00e5ff';
-            ctx.fillRect(-pw / 2, -ch / 2 + 0.05, pw, ph);
-            ctx.strokeRect(-pw / 2, -ch / 2 + 0.05, pw, ph);
+            ctx.fillRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
+            ctx.strokeRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
           }}
         }}
 
@@ -1482,27 +1515,38 @@ function render() {{
         // Rotates along component primary axis and flips automatically to remain right-side up.
         // Generic centered RefDes suppressed on small passives to prevent overlapping silkscreen.
         if (isLargeIC || isTarget) {{
-          const isWide = cw >= ch;
-          let textAngle = isWide ? 0 : Math.PI / 2;
-          let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
-          // Normalize to [0, 2*PI]
-          totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-          // Auto-flip if upside down in screen coordinates
-          const flip = (totalWorldAngle > Math.PI / 2 && totalWorldAngle < 3 * Math.PI / 2);
+          const maxDim = cw >= ch ? cw : ch;
+          const minDim = cw >= ch ? ch : cw;
 
-          const maxDim = isWide ? cw : ch;
-          const minDim = isWide ? ch : cw;
-          const onScreenDim = minDim * scale;
+          // Physical font height in millimeters (strictly bounded, never giant!)
+          let fontMm = Math.min(minDim * 0.40, 2.0);
+          if (fontMm * 0.6 * ref.length > maxDim * 0.85) {{
+            fontMm = (maxDim * 0.85) / (ref.length * 0.6);
+          }}
+          fontMm = Math.max(fontMm, 0.6);
 
-          if (onScreenDim >= 14 || isTarget) {{
+          // On-screen font height in actual screen pixels
+          const onScreenFontPx = fontMm * scale;
+
+          // LOD Threshold: Suppress IC labels when zoomed out to prevent giant overlapping clutter!
+          // Only render when on-screen font is clearly legible (>= 7.5 px) or when active search target
+          if (onScreenFontPx >= 7.5 || isTarget) {{
             ctx.save();
+            ctx.translate(pxc, pyc);
+
+            const isWide = cw >= ch;
+            let textAngle = isWide ? 0 : Math.PI / 2;
+            let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
+            totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+            const flip = (totalWorldAngle > Math.PI / 2 && totalWorldAngle < 3 * Math.PI / 2);
+
             ctx.rotate(textAngle);
             if (flip) ctx.rotate(Math.PI);
             ctx.scale(mirrorX ? -1 : 1, -1);
 
-            const fontMm = Math.min((maxDim * 0.75) / (ref.length * 0.58), minDim * 0.55);
-            const fontPx = Math.max(fontMm * scale, 9);
-            ctx.font = `700 ${{Math.min(fontPx, 22)}}px -apple-system, BlinkMacSystemFont, sans-serif`;
+            const FONT_RES = 64;
+            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillStyle = isTarget ? '#ff2222' : '#ff9900';
@@ -1515,6 +1559,7 @@ function render() {{
       // Search Highlight Indicator Ring
       if (isTarget) {{
         ctx.save();
+        ctx.translate(pxc, pyc);
         ctx.strokeStyle = '#ff2222';
         ctx.lineWidth = Math.max(0.3, 2.5 / scale);
         ctx.beginPath();

@@ -19,6 +19,12 @@ misc/
 *.stp
 *.obj
 
+# Screenshots & Images
+*.png
+*.jpg
+*.jpeg
+*.webp
+
 # Python caches
 __pycache__/
 *.py[cod]
