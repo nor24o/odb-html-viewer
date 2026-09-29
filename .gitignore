@@ -1,0 +1,32 @@
+# PCB Archives & ODB++ Data
+*.zip
+*.tgz
+*.tar.gz
+*.tar
+steps/
+matrix/
+symbols/
+fonts/
+misc/
+
+# Generated HTML Viewers & Outputs
+*.html
+*.htm
+
+# 3D Models & CAD files
+*.stl
+*.step
+*.stp
+*.obj
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE / OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
