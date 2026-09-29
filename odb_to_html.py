@@ -1330,7 +1330,7 @@ document.getElementById('btn-top').addEventListener('click', () => {{
   mirrorX = false;
   board.layers.forEach(l => {{
     if (l.side === 'TOP') {{
-      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK');
     }} else if (l.side === 'BOTTOM' || l.side === 'INNER') {{
       l.visible = false;
     }}
@@ -1344,7 +1344,7 @@ document.getElementById('btn-bot').addEventListener('click', () => {{
   mirrorX = true;
   board.layers.forEach(l => {{
     if (l.side === 'BOTTOM') {{
-      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK');
     }} else if (l.side === 'TOP' || l.side === 'INNER') {{
       l.visible = false;
     }}
@@ -1598,7 +1598,7 @@ def main():
             order = 15
         elif l_type == "SILK_SCREEN" and side == "TOP":
             color = "#d9a738"  # Amber Gold Silk
-            is_visible = True
+            is_visible = False
             order = 60
         elif l_type == "SILK_SCREEN" and side == "BOTTOM":
             color = "#8fa370"

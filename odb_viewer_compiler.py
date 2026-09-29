@@ -2382,13 +2382,13 @@ function render() {{
       }}
 
       const fontSize = Math.round(fontPx);
-      ctx.font = `bold ${{fontSize}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace`;
+      ctx.font = `600 ${{fontSize}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
 
-      // Contrast outline: dark stroke ensures 100% readability over copper, pads, or laminate
-      ctx.lineWidth = Math.max(1.8, fontSize * 0.16);
-      ctx.strokeStyle = '#05080c';
+      // Contrast outline: subtle dark halo prevents background clash without glyph bloating
+      ctx.lineWidth = Math.max(0.75, Math.min(1.2, fontSize * 0.08));
+      ctx.strokeStyle = 'rgba(5, 8, 12, 0.95)';
       ctx.strokeText(ref, 0, 0);
 
       // Distinct, clean fill colors
@@ -2555,7 +2555,7 @@ function setViewSide(targetSide) {{
     btnBot.classList.remove('active');
     board.layers.forEach(l => {{
       if (l.side === 'TOP') {{
-        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK');
       }} else if (l.side === 'BOTTOM' || l.side === 'INNER') {{
         l.visible = false;
       }}
@@ -2567,7 +2567,7 @@ function setViewSide(targetSide) {{
     btnTop.classList.remove('active');
     board.layers.forEach(l => {{
       if (l.side === 'BOTTOM') {{
-        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK');
       }} else if (l.side === 'TOP' || l.side === 'INNER') {{
         l.visible = false;
       }}
@@ -3610,7 +3610,7 @@ def main():
             order = 15
         elif l_type == "SILK_SCREEN" and side == "TOP":
             color = "#d9a738"  # Top Silkscreen (Amber Gold)
-            is_visible = True
+            is_visible = False
             order = 60
         elif l_type == "SILK_SCREEN" and side == "BOTTOM":
             color = "#8fa370"  # Bottom Silkscreen
