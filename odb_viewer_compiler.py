@@ -646,7 +646,7 @@ def parse_eda_packages(eda_content):
                 except Exception:
                     pass
 
-    # Automatically derive footprint boundaries from outer pin extents if missing or too small
+    # Automatically derive footprint boundaries and primary body axis from outer pin extents
     for pkg in pkg_list:
         if pkg["pins"]:
             xs = [p["x"] for p in pkg["pins"]]
@@ -661,6 +661,18 @@ def parse_eda_packages(eda_content):
             if pkg["h"] <= 0.2 or span_y > pkg["h"]:
                 pkg["h"] = span_y
                 pkg["yc"] = round((min(ys) + max(ys)) / 2.0, 2)
+
+            # Determine IC body alignment: 1 = Y-aligned (pin rows run along Y), 0 = X-aligned
+            distinct_x = len(set(round(x, 1) for x in xs))
+            distinct_y = len(set(round(y, 1) for y in ys))
+            if distinct_y > distinct_x:
+                pkg["axis"] = 1
+            elif distinct_x > distinct_y:
+                pkg["axis"] = 0
+            else:
+                pkg["axis"] = 0 if pkg["w"] >= pkg["h"] else 1
+        else:
+            pkg["axis"] = 0 if pkg["w"] >= pkg["h"] else 1
 
     return packages, pkg_list
 
@@ -746,7 +758,10 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
                 is_non_passive = not rf.startswith(("R", "C", "L", "D", "J", "P", "H", "TP", "FID", "MK", "MH", "W"))
                 is_large_ic = not is_tp and (is_ic or (is_non_passive and (pw >= 3.5 or ph >= 3.5))) and max(pw, ph) <= 45.0
 
-                # Compact array structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic, pxc, pyc]
+                # Body axis from package: 1 = Y-aligned, 0 = X-aligned
+                body_axis = pkg.get("axis", 0 if pw >= ph else 1) if pkg else (0 if pw >= ph else 1)
+
+                # Compact array structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic, pxc, pyc, body_axis]
                 components.append([
                     ref,
                     round(x, 2),
@@ -761,12 +776,30 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
                     1 if is_tp else 0,
                     1 if is_large_ic else 0,
                     round(pxc, 2),
-                    round(pyc, 2)
+                    round(pyc, 2),
+                    body_axis
                 ])
             except Exception:
                 continue
 
-    return components
+    # Deduplicate overlapping alternate DNP footprints (e.g. unmounted part '0' placed on top of mounted part)
+    seen_pos = {}
+    deduped_components = []
+    for cmp_entry in components:
+        pos_k = (cmp_entry[1], cmp_entry[2])
+        part_val = str(cmp_entry[8]).strip()
+        if pos_k in seen_pos:
+            idx = seen_pos[pos_k]
+            prev_entry = deduped_components[idx]
+            prev_part = str(prev_entry[8]).strip()
+            # If current component is placed (has part number) and previous was unplaced ('0' or empty), replace with placed
+            if prev_part in ("0", "") and part_val not in ("0", ""):
+                deduped_components[idx] = cmp_entry
+            continue
+        seen_pos[pos_k] = len(deduped_components)
+        deduped_components.append(cmp_entry)
+
+    return deduped_components
 
 
 def parse_eda_nets(eda_content, top_components, bot_components):
@@ -2091,70 +2124,60 @@ function render() {{
           }}
         }}
 
-        // Universal RefDes Text centered inside Component Courtyard (drawn OVER pads & copper with high contrast)
-        // Rendered for ALL components (ICs, passives, connectors, transistors)
-        // Rotates along component primary axis and flips automatically to remain right-side up.
-        const maxDim = cw >= ch ? cw : ch;
-        const minDim = cw >= ch ? ch : cw;
+        // RefDes Text inside Component Body:
+        // Rendered for Large ICs / Semiconductor chips (or search/selection target)
+        // Strictly placed INSIDE the IC package body between pin rows.
+        // NO OPAQUE BLACK PILLS! Transparent background to never disrupt copper, pads, or routing!
+        if (isLargeIC || isTarget) {{
+          const bodyAxis = cmp[14] !== undefined ? cmp[14] : (cw >= ch ? 0 : 1);
+          const maxDim = cw >= ch ? cw : ch;
+          const minDim = cw >= ch ? ch : cw;
 
-        // Physical font height in millimeters (bounded to fit inside package dimensions)
-        let fontMm = isLargeIC ? Math.min(minDim * 0.42, 2.0) : Math.min(minDim * 0.65, 1.4);
-        const charW = fontMm * 0.58;
-        if (charW * ref.length > maxDim * 0.88) {{
-          fontMm = (maxDim * 0.88) / (ref.length * 0.58);
-        }}
-        fontMm = Math.max(fontMm, 0.22);
+          // Physical font height in millimeters (strictly bounded to fit inside package body)
+          let fontMm = Math.min(minDim * 0.38, 2.0);
+          const charW = fontMm * 0.58;
+          if (charW * ref.length > maxDim * 0.85) {{
+            fontMm = (maxDim * 0.85) / (ref.length * 0.58);
+          }}
+          fontMm = Math.max(fontMm, 0.4);
 
-        // On-screen font height in actual screen pixels
-        const onScreenFontPx = fontMm * scale;
+          // On-screen font height in actual screen pixels
+          const onScreenFontPx = fontMm * scale;
 
-        // LOD Threshold: render when text is legible on screen (>= 6.0 px) or when search/selection target
-        if (onScreenFontPx >= 6.0 || isTarget) {{
-          ctx.save();
-          ctx.translate(pxc, pyc);
+          // LOD Threshold: render when clearly legible on screen (>= 6.5 px) or when search target
+          if (onScreenFontPx >= 6.5 || isTarget) {{
+            ctx.save();
+            ctx.translate(pxc, pyc);
 
-          const isWide = cw >= ch;
-          let textAngle = isWide ? 0 : Math.PI / 2;
-          let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
-          totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-          const flip = (totalWorldAngle > Math.PI / 2 + 0.01 && totalWorldAngle < 3 * Math.PI / 2 - 0.01);
+            // Rotate along IC body axis (bodyAxis === 1 means body runs along Y in package)
+            let textAngle = (bodyAxis === 1) ? Math.PI / 2 : 0;
+            let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
+            totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+            const flip = (totalWorldAngle > Math.PI / 2 + 0.01 && totalWorldAngle < 3 * Math.PI / 2 - 0.01);
 
-          ctx.rotate(textAngle);
-          if (flip) ctx.rotate(Math.PI);
-          ctx.scale(mirrorX ? -1 : 1, -1);
+            ctx.rotate(textAngle);
+            if (flip) ctx.rotate(Math.PI);
+            ctx.scale(mirrorX ? -1 : 1, -1);
 
-          // 1. Dark high-contrast backing pill OVER pads and copper
-          const textW = ref.length * 0.58 * fontMm;
-          const textH = fontMm * 1.1;
-          const padMarginX = Math.min(0.25, fontMm * 0.22);
-          const padMarginY = Math.min(0.12, fontMm * 0.15);
-          const pillW = textW + padMarginX * 2;
-          const pillH = textH + padMarginY * 2;
+            // Clean, non-disruptive vector text inside chip body (NO black box!)
+            const FONT_RES = 64;
+            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
 
-          ctx.fillStyle = 'rgba(6, 10, 15, 0.88)';
-          ctx.fillRect(-pillW / 2, -pillH / 2, pillW, pillH);
-          ctx.strokeStyle = isTarget ? '#ff2222' : (isLargeIC ? 'rgba(255, 153, 0, 0.45)' : 'rgba(0, 229, 255, 0.35)');
-          ctx.lineWidth = Math.max(0.04, 0.7 / scale);
-          ctx.strokeRect(-pillW / 2, -pillH / 2, pillW, pillH);
+            // Subtle dark stroke for contrast over laminate and copper
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = Math.max(FONT_RES * 0.12, (1.8 * FONT_RES) / (fontMm * scale));
+            ctx.strokeStyle = '#060a0f';
+            ctx.strokeText(ref, 0, 0);
 
-          // 2. High-resolution Crisp Vector Text Rendering
-          const FONT_RES = 64;
-          ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-          ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
+            // Amber gold for ICs, bright white for search target
+            ctx.fillStyle = isTarget ? '#ffffff' : '#ffb347';
+            ctx.fillText(ref, 0, 0);
 
-          // Dark stroke for razor-sharp edge contrast over pads & copper
-          ctx.lineJoin = 'round';
-          ctx.lineWidth = Math.max(FONT_RES * 0.14, (2.0 * FONT_RES) / (fontMm * scale));
-          ctx.strokeStyle = '#060a0f';
-          ctx.strokeText(ref, 0, 0);
-
-          // Vibrant foreground fill
-          ctx.fillStyle = isTarget ? '#ffffff' : (isLargeIC ? '#ffb347' : '#ffffff');
-          ctx.fillText(ref, 0, 0);
-
-          ctx.restore();
+            ctx.restore();
+          }}
         }}
       }}
 
