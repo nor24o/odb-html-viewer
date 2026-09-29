@@ -805,11 +805,11 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
     return deduped_components
 
 
-def parse_eda_nets(eda_content, top_components, bot_components):
+def parse_eda_nets(eda_content, top_components, bot_components, source=None, step=None):
     """
-    Extracts electrical net definitions and their component/pin connections.
+    Extracts electrical net definitions, component/pin connections, physical copper trace segments, and vias.
     Returns:
-      final_nets: list of [net_name, [[side_code, comp_ref, pin_name, wx, wy, is_tp], ...], bbox]
+      final_nets: list of [net_name, pins, bbox, trace_segs, via_pts]
       comp_nets: dict mapping comp_ref -> list of net_names
     """
     final_nets = []
@@ -853,8 +853,54 @@ def parse_eda_nets(eda_content, top_components, bot_components):
 
         return [side, cmp_obj[0], pin_name, round(wx, 2), round(wy, 2), is_tp]
 
+    # Pre-parse copper & drill layer features if source is provided
+    lyr_names = []
+    layer_feats = {}
+    if source:
+        for line in eda_content.splitlines():
+            if line.startswith("LYR "):
+                lyr_names = line.split()[1:]
+                break
+
+        for l_idx, l_name in enumerate(lyr_names):
+            f_content, _ = read_file_from_source(source, f"layers/{l_name}/features", preferred_step=step)
+            if f_content:
+                c_scale, _ = get_unit_scale_to_mm(f_content)
+                feats = []
+                for line in f_content.splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#") or s.startswith("UNITS") or s.startswith("$"):
+                        continue
+                    cmd = s.split()[0]
+                    if cmd == "L":
+                        toks = s.split()
+                        if len(toks) >= 5:
+                            feats.append(("L", round(float(toks[1]) * c_scale, 2), round(float(toks[2]) * c_scale, 2), round(float(toks[3]) * c_scale, 2), round(float(toks[4]) * c_scale, 2)))
+                        else:
+                            feats.append((cmd,))
+                    elif cmd == "A":
+                        toks = s.split()
+                        if len(toks) >= 7:
+                            feats.append(("A", round(float(toks[1]) * c_scale, 2), round(float(toks[2]) * c_scale, 2), round(float(toks[3]) * c_scale, 2), round(float(toks[4]) * c_scale, 2)))
+                        else:
+                            feats.append((cmd,))
+                    elif cmd == "P":
+                        toks = s.split()
+                        if len(toks) >= 3:
+                            feats.append(("P", round(float(toks[1]) * c_scale, 2), round(float(toks[2]) * c_scale, 2)))
+                        else:
+                            feats.append((cmd,))
+                    elif cmd in ("T", "S"):
+                        feats.append((cmd,))
+                layer_feats[l_idx] = feats
+
     nets_raw = {}
+    nets_trc_fids = {}
+    nets_via_fids = {}
     cur_net = None
+    is_trc = False
+    is_via = False
+
     for line in eda_content.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -863,18 +909,42 @@ def parse_eda_nets(eda_content, top_components, bot_components):
         if toks[0] == "NET":
             cur_net = toks[1] if len(toks) > 1 else "UNNAMED"
             nets_raw[cur_net] = []
-        elif cur_net and toks[0] == "SNT" and len(toks) >= 5 and toks[1] == "TOP":
-            side_char = toks[2].upper()
+            nets_trc_fids[cur_net] = []
+            nets_via_fids[cur_net] = []
+            is_trc = False
+            is_via = False
+        elif cur_net and toks[0] == "SNT":
+            if len(toks) >= 5 and toks[1] == "TOP":
+                side_char = toks[2].upper()
+                try:
+                    comp_idx = int(toks[3])
+                    pin_idx_str = toks[4]
+                    nets_raw[cur_net].append((side_char, comp_idx, pin_idx_str))
+                except ValueError:
+                    pass
+                is_trc = False
+                is_via = False
+            elif (len(toks) > 1 and toks[1] == "TRC") or (len(toks) > 2 and toks[2] == "TRC"):
+                is_trc = True
+                is_via = False
+            elif (len(toks) > 1 and toks[1] == "VIA") or (len(toks) > 2 and toks[2] == "VIA"):
+                is_via = True
+                is_trc = False
+            else:
+                is_trc = False
+                is_via = False
+        elif cur_net and is_trc and toks[0] == "FID" and len(toks) >= 4:
             try:
-                comp_idx = int(toks[3])
-                pin_idx_str = toks[4]
-                nets_raw[cur_net].append((side_char, comp_idx, pin_idx_str))
+                nets_trc_fids[cur_net].append((int(toks[2]), int(toks[3])))
+            except ValueError:
+                pass
+        elif cur_net and is_via and toks[0] == "FID" and len(toks) >= 4:
+            try:
+                nets_via_fids[cur_net].append((int(toks[2]), int(toks[3])))
             except ValueError:
                 pass
 
     for n_name, p_list in nets_raw.items():
-        if not p_list:
-            continue
         resolved = []
         xs, ys = [], []
         for s_char, c_idx, p_idx in p_list:
@@ -895,9 +965,38 @@ def parse_eda_nets(eda_content, top_components, bot_components):
                 if n_name not in comp_nets[c_ref]:
                     comp_nets[c_ref].append(n_name)
 
-        if resolved:
-            bbox = [round(min(xs), 2), round(min(ys), 2), round(max(xs), 2), round(max(ys), 2)]
-            final_nets.append([n_name, resolved, bbox])
+        # Resolve physical trace segments: [side, xs, ys, xe, ye, ...]
+        trace_segs = []
+        for l_idx, f_idx in nets_trc_fids.get(n_name, []):
+            if l_idx in layer_feats and f_idx < len(layer_feats[l_idx]):
+                feat = layer_feats[l_idx][f_idx]
+                if feat[0] in ("L", "A"):
+                    l_name = lyr_names[l_idx].lower() if l_idx < len(lyr_names) else ""
+                    side = 0 if "top" in l_name else (1 if ("bot" in l_name or "bottom" in l_name) else 2)
+                    trace_segs.extend([side, feat[1], feat[2], feat[3], feat[4]])
+                    xs.extend([feat[1], feat[3]])
+                    ys.extend([feat[2], feat[4]])
+
+        # Resolve via coordinates: [vx, vy, ...]
+        via_pts = []
+        seen_vias = set()
+        for l_idx, f_idx in nets_via_fids.get(n_name, []):
+            if l_idx in layer_feats and f_idx < len(layer_feats[l_idx]):
+                feat = layer_feats[l_idx][f_idx]
+                if feat[0] == "P":
+                    pt = (feat[1], feat[2])
+                    if pt not in seen_vias:
+                        seen_vias.add(pt)
+                        via_pts.extend([feat[1], feat[2]])
+                        xs.append(feat[1])
+                        ys.append(feat[2])
+
+        if resolved or trace_segs or via_pts:
+            if xs and ys:
+                bbox = [round(min(xs), 2), round(min(ys), 2), round(max(xs), 2), round(max(ys), 2)]
+            else:
+                bbox = [0.0, 0.0, 10.0, 10.0]
+            final_nets.append([n_name, resolved, bbox, trace_segs, via_pts])
 
     final_nets.sort(key=lambda n: n[0].lower())
     return final_nets, comp_nets
@@ -1819,6 +1918,7 @@ function onDataReady(data) {{
 
   buildComponentPaths();
   buildSpatialGrid();
+  buildTraceSpatialGrid();
   buildLayerList();
   initTabsAndLists();
   resize();
@@ -1853,6 +1953,82 @@ function buildSpatialGrid() {{
       }}
     }}
   }}
+}}
+
+const TRACE_GRID_CELL = 15.0;
+const traceSpatialGrid = new Map();
+
+function buildTraceSpatialGrid() {{
+  traceSpatialGrid.clear();
+  if (!board || !board.nets) return;
+  for (const net of board.nets) {{
+    const traceSegs = net[3];
+    if (!traceSegs || traceSegs.length === 0) continue;
+    for (let i = 0; i < traceSegs.length; i += 5) {{
+      const side = traceSegs[i];
+      const x1 = traceSegs[i + 1], y1 = traceSegs[i + 2];
+      const x2 = traceSegs[i + 3], y2 = traceSegs[i + 4];
+      const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+      const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+      const gx1 = Math.floor(minX / TRACE_GRID_CELL);
+      const gx2 = Math.floor(maxX / TRACE_GRID_CELL);
+      const gy1 = Math.floor(minY / TRACE_GRID_CELL);
+      const gy2 = Math.floor(maxY / TRACE_GRID_CELL);
+      for (let gx = gx1; gx <= gx2; gx++) {{
+        for (let gy = gy1; gy <= gy2; gy++) {{
+          const k = side + '_' + gx + '_' + gy;
+          let list = traceSpatialGrid.get(k);
+          if (!list) {{
+            list = [];
+            traceSpatialGrid.set(k, list);
+          }}
+          list.push([net, x1, y1, x2, y2]);
+        }}
+      }}
+    }}
+  }}
+}}
+
+function distToSegmentSq(px, py, x1, y1, x2, y2) {{
+  const dx = x2 - x1, dy = y2 - y1;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) {{
+    const dpx = px - x1, dpy = py - y1;
+    return dpx * dpx + dpy * dpy;
+  }}
+  let t = ((px - x1) * dx + (py - y1) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  const rx = px - projX, ry = py - projY;
+  return rx * rx + ry * ry;
+}}
+
+function hitTestTrace(clientX, clientY) {{
+  if (!board || !board.nets) return null;
+  const mx = clientX * window.devicePixelRatio;
+  const my = clientY * window.devicePixelRatio;
+  const [wx, wy] = toWorld(mx, my);
+  const curSideCode = mirrorX ? 1 : 0;
+  const gx = Math.floor(wx / TRACE_GRID_CELL);
+  const gy = Math.floor(wy / TRACE_GRID_CELL);
+  const candidates = traceSpatialGrid.get(curSideCode + '_' + gx + '_' + gy);
+  if (!candidates) return null;
+
+  const maxDist = Math.max(0.40, 6.0 / scale);
+  const maxDistSq = maxDist * maxDist;
+  let bestNet = null;
+  let bestDistSq = Infinity;
+
+  for (const item of candidates) {{
+    const net = item[0];
+    const dSq = distToSegmentSq(wx, wy, item[1], item[2], item[3], item[4]);
+    if (dSq <= maxDistSq && dSq < bestDistSq) {{
+      bestDistSq = dSq;
+      bestNet = net;
+    }}
+  }}
+  return bestNet;
 }}
 
 function buildComponentPaths() {{
@@ -2220,31 +2396,99 @@ function render() {{
     }}
   }}
 
-  // 6. Selected Trace / Net Pin & Flight-Line Highlights
-  if (selectedNet && selectedNet[1] && selectedNet[1].length > 0) {{
+  // 6. Selected Trace / Net: Physical Copper Route, Vias & Connected Pins
+  if (selectedNet) {{
     const curSideCode = mirrorX ? 1 : 0;
-    const netPins = selectedNet[1];
+    const netPins = selectedNet[1] || [];
+    const traceSegs = selectedNet[3] || [];
+    const netVias = selectedNet[4] || [];
 
-    // Flight-lines connecting nodes
-    ctx.save();
-    ctx.strokeStyle = '#ffe600';
-    ctx.lineWidth = Math.max(0.25, 1.8 / scale);
-    ctx.setLineDash([4 / scale, 3 / scale]);
-    ctx.beginPath();
-    let first = true;
-    for (const p of netPins) {{
-      const [pside, pref, pname, wx, wy] = p;
-      if (first) {{
-        ctx.moveTo(wx, wy);
-        first = false;
-      }} else {{
-        ctx.lineTo(wx, wy);
+    // --- A. Physical Copper Trace Routing ---
+    if (traceSegs.length > 0) {{
+      // 1. Other Side & Inner Layer Copper Routing (subtle dashed context)
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 230, 0, 0.40)';
+      ctx.lineWidth = Math.max(0.20, 1.6 / scale);
+      ctx.setLineDash([4 / scale, 3 / scale]);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      for (let i = 0; i < traceSegs.length; i += 5) {{
+        if (traceSegs[i] !== curSideCode) {{
+          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+        }}
       }}
-    }}
-    ctx.stroke();
-    ctx.restore();
+      ctx.stroke();
+      ctx.restore();
 
-    // Node circles and labels
+      // 2. Current Side Copper Routing (Bright Glowing Highlight)
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Outer luminous halo
+      ctx.strokeStyle = '#ffe600';
+      ctx.lineWidth = Math.max(0.60, 3.8 / scale);
+      ctx.beginPath();
+      for (let i = 0; i < traceSegs.length; i += 5) {{
+        if (traceSegs[i] === curSideCode) {{
+          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+        }}
+      }}
+      ctx.stroke();
+
+      // High-contrast bright core
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(0.25, 1.8 / scale);
+      ctx.beginPath();
+      for (let i = 0; i < traceSegs.length; i += 5) {{
+        if (traceSegs[i] === curSideCode) {{
+          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+        }}
+      }}
+      ctx.stroke();
+      ctx.restore();
+    }} else if (netPins.length > 1) {{
+      // Fallback: If net has no routed copper in CAD data, draw subtle airwire
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 230, 0, 0.50)';
+      ctx.lineWidth = Math.max(0.20, 1.2 / scale);
+      ctx.setLineDash([3 / scale, 3 / scale]);
+      ctx.beginPath();
+      let first = true;
+      for (const p of netPins) {{
+        const wx = p[3], wy = p[4];
+        if (first) {{ ctx.moveTo(wx, wy); first = false; }}
+        else {{ ctx.lineTo(wx, wy); }}
+      }}
+      ctx.stroke();
+      ctx.restore();
+    }}
+
+    // --- B. Vias on Net ---
+    if (netVias.length > 0) {{
+      ctx.save();
+      for (let i = 0; i < netVias.length; i += 2) {{
+        const vx = netVias[i], vy = netVias[i + 1];
+        // Via copper pad ring
+        ctx.fillStyle = '#ffe600';
+        ctx.beginPath();
+        ctx.arc(vx, vy, Math.max(0.35, 2.5 / scale), 0, Math.PI * 2);
+        ctx.fill();
+
+        // Via drill hole center
+        ctx.fillStyle = '#0d1117';
+        ctx.beginPath();
+        ctx.arc(vx, vy, Math.max(0.18, 1.2 / scale), 0, Math.PI * 2);
+        ctx.fill();
+      }}
+      ctx.restore();
+    }}
+
+    // --- C. Connected Pin Terminals ---
     for (const p of netPins) {{
       const [pside, pref, pname, wx, wy, isTp] = p;
       const isCurSide = (pside === curSideCode);
@@ -2253,7 +2497,7 @@ function render() {{
       ctx.translate(wx, wy);
 
       ctx.strokeStyle = isTp ? '#00e5ff' : '#ffe600';
-      ctx.fillStyle = isTp ? 'rgba(0, 229, 255, 0.45)' : 'rgba(255, 230, 0, 0.45)';
+      ctx.fillStyle = isTp ? 'rgba(0, 229, 255, 0.50)' : 'rgba(255, 230, 0, 0.50)';
       ctx.lineWidth = Math.max(0.25, 2.0 / scale);
 
       const r = isTp ? 1.0 : 0.6;
@@ -2266,7 +2510,7 @@ function render() {{
         ctx.scale(mirrorX ? -1 : 1, -1);
         const FONT_RES = 64;
         ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-        ctx.font = `bold ${{Math.round(1.1 * FONT_RES)}}px monospace`;
+        ctx.font = `600 ${{Math.round(1.1 * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillStyle = isTp ? '#00e5ff' : '#ffe600';
@@ -2932,36 +3176,51 @@ function renderTraceList() {{
   }}
 }}
 
-function selectTrace(net) {{
+function selectTrace(net, autoPan = true) {{
   selectedNet = net;
-  const name = net[0];
-  const pins = net[1];
-  const bbox = net[2];
+  selectedComp = null;
+  selectedTP = null;
+  searchTarget = net[0];
 
-  const topCount = pins.filter(p => p[0] === 0).length;
-  const botCount = pins.filter(p => p[0] === 1).length;
+  const name = net[0];
+  const pins = net[1] || [];
+  const bbox = net[2];
+  const traceSegs = net[3] || [];
+  const netVias = net[4] || [];
+
+  let topCount = pins.filter(p => p[0] === 0).length;
+  let botCount = pins.filter(p => p[0] === 1).length;
+  for (let i = 0; i < traceSegs.length; i += 5) {{
+    if (traceSegs[i] === 0) topCount++;
+    else if (traceSegs[i] === 1) botCount++;
+  }}
+
   if (topCount >= botCount && mirrorX) {{
     setViewSide('TOP');
   }} else if (botCount > topCount && !mirrorX) {{
     setViewSide('BOTTOM');
   }}
 
-  const [minX, minY, maxX, maxY] = bbox;
-  const bW = Math.max(maxX - minX, 10.0);
-  const bH = Math.max(maxY - minY, 10.0);
-  const pad = 64 * window.devicePixelRatio;
-  scale = Math.min((canvas.width - pad * 2) / bW, (canvas.height - pad * 2) / bH);
-  scale = Math.min(Math.max(scale, 2.0 * window.devicePixelRatio), 24.0 * window.devicePixelRatio);
+  if (autoPan && bbox) {{
+    const [minX, minY, maxX, maxY] = bbox;
+    const bW = Math.max(maxX - minX, 10.0);
+    const bH = Math.max(maxY - minY, 10.0);
+    const pad = 64 * window.devicePixelRatio;
+    scale = Math.min((canvas.width - pad * 2) / bW, (canvas.height - pad * 2) / bH);
+    scale = Math.min(Math.max(scale, 2.0 * window.devicePixelRatio), 24.0 * window.devicePixelRatio);
 
-  const midX = (minX + maxX) / 2;
-  const midY = (minY + maxY) / 2;
-  panX = canvas.width / 2 - (mirrorX ? -midX : midX) * scale;
-  panY = canvas.height / 2 + midY * scale;
+    const midX = (minX + maxX) / 2;
+    const midY = (minY + maxY) / 2;
+    panX = canvas.width / 2 - (mirrorX ? -midX : midX) * scale;
+    panY = canvas.height / 2 + midY * scale;
+  }}
 
   const insp = document.getElementById('inspector-trace');
   insp.style.display = 'flex';
   const tps = pins.filter(p => p[5] === 1);
   const comps = pins.filter(p => p[5] === 0);
+  const segCount = Math.floor(traceSegs.length / 5);
+  const viaCount = Math.floor(netVias.length / 2);
 
   insp.innerHTML = `
     <div class="inspector-header">
@@ -2969,7 +3228,8 @@ function selectTrace(net) {{
       <button class="inspector-btn-close" id="close-trace-insp">✕</button>
     </div>
     <div class="inspector-detail">
-      <strong>Total Nodes:</strong> ${{pins.length}} (${{comps.length}} Component Pins, ${{tps.length}} Test Points)
+      <strong>Total Nodes:</strong> ${{pins.length}} (${{comps.length}} Component Pins, ${{tps.length}} Test Points)<br>
+      <strong>Physical Route:</strong> ${{segCount}} Copper Segments${{viaCount > 0 ? ` | ${{viaCount}} Vias` : ''}}
     </div>
     ${{tps.length > 0 ? `
       <div style="font-size:10px; color:#00e5ff; margin-top:2px;">TEST POINTS ON TRACE:</div>
@@ -2988,6 +3248,7 @@ function selectTrace(net) {{
   insp.querySelector('#close-trace-insp').addEventListener('click', () => {{
     insp.style.display = 'none';
     selectedNet = null;
+    searchTarget = null;
     scheduleRender();
   }});
 
@@ -3315,8 +3576,14 @@ canvas.addEventListener('mousemove', e => {{
       canvas.style.cursor = 'pointer';
       canvas.title = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
     }} else {{
-      canvas.style.cursor = 'default';
-      canvas.title = '';
+      const hitNet = hitTestTrace(e.clientX, e.clientY);
+      if (hitNet) {{
+        canvas.style.cursor = 'pointer';
+        canvas.title = `Trace: ${{hitNet[0]}}`;
+      }} else {{
+        canvas.style.cursor = 'default';
+        canvas.title = '';
+      }}
     }}
   }}
 
@@ -3324,7 +3591,7 @@ canvas.addEventListener('mousemove', e => {{
   posCoords.textContent = `X: ${{wx.toFixed(3)}} mm, Y: ${{wy.toFixed(3)}} mm`;
 }});
 
-// Canvas Direct Click Selection for Components & Test Points
+// Canvas Direct Click Selection for Components, Test Points & Traces
 canvas.addEventListener('click', e => {{
   const dragDist = Math.hypot(e.clientX - mouseDownClientX, e.clientY - mouseDownClientY);
   if (dragDist > 5 || isMeasuring || e.shiftKey) return;
@@ -3339,15 +3606,24 @@ canvas.addEventListener('click', e => {{
       selectComponent(hit.item, false);
     }}
   }} else {{
-    // Clicked empty board area: deselect
-    selectedComp = null;
-    selectedTP = null;
-    searchTarget = null;
-    document.getElementById('inspector-comp').style.display = 'none';
-    document.getElementById('inspector-tp').style.display = 'none';
-    renderCompList();
-    renderTPList();
-    scheduleRender();
+    const hitNet = hitTestTrace(e.clientX, e.clientY);
+    if (hitNet) {{
+      switchTab('tab-traces');
+      selectTrace(hitNet, false);
+    }} else {{
+      // Clicked empty board area: deselect
+      selectedComp = null;
+      selectedTP = null;
+      selectedNet = null;
+      searchTarget = null;
+      document.getElementById('inspector-comp').style.display = 'none';
+      document.getElementById('inspector-tp').style.display = 'none';
+      document.getElementById('inspector-trace').style.display = 'none';
+      renderCompList();
+      renderTPList();
+      renderTraceList();
+      scheduleRender();
+    }}
   }}
 }});
 
@@ -3482,8 +3758,8 @@ def main():
     bot_components = parse_components_with_packages(comp_bot_raw, packages, pkg_list, side="BOTTOM")
     components = top_components + bot_components
 
-    # 4b. Parse Electrical Nets & Signal Connectivity
-    final_nets, comp_nets = parse_eda_nets(eda_content, top_components, bot_components)
+    # 4b. Parse Electrical Nets & Signal Connectivity (including Physical Copper Traces & Vias)
+    final_nets, comp_nets = parse_eda_nets(eda_content, top_components, bot_components, source=args.odb_input, step=step)
     tp_count = sum(1 for c in components if c[10] == 1)
     std_comp_count = len(components) - tp_count
     print(f"Extracted {len(components)} component footprints ({std_comp_count} components, {tp_count} test points) and {len(final_nets)} electrical nets.")
