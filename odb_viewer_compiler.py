@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous ODB++ to PCB Investigator-Grade HTML5 Standalone Viewer Compiler.
+Autonomous ODB++ HTML5 Standalone Viewer Compiler.
 Single-file script with zero external dependencies (pure Python standard library).
 Parses any valid ODB++ archive (.zip, .tgz, .tar.gz, or extracted directory)
 and compiles a self-contained, offline-ready, high-performance HTML5 Canvas viewer.
@@ -735,6 +735,104 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
     return components
 
 
+def parse_eda_nets(eda_content, top_components, bot_components):
+    """
+    Extracts electrical net definitions and their component/pin connections.
+    Returns:
+      final_nets: list of [net_name, [[side_code, comp_ref, pin_name, wx, wy, is_tp], ...], bbox]
+      comp_nets: dict mapping comp_ref -> list of net_names
+    """
+    final_nets = []
+    comp_nets = {}
+    if not eda_content:
+        return final_nets, comp_nets
+
+    def resolve_pin_pos(cmp_obj, pin_idx_str):
+        cx = cmp_obj[1]
+        cy = cmp_obj[2]
+        crot = cmp_obj[5]
+        mir = cmp_obj[6]
+        side = cmp_obj[7]
+        pins = cmp_obj[9]
+        is_tp = cmp_obj[10]
+
+        p_obj = None
+        if pin_idx_str.isdigit():
+            p_idx = int(pin_idx_str)
+            if p_idx < len(pins):
+                p_obj = pins[p_idx]
+        if p_obj is None:
+            for p in pins:
+                if str(p[0]) == pin_idx_str:
+                    p_obj = p
+                    break
+
+        if p_obj is not None:
+            pin_name = str(p_obj[0])
+            px = p_obj[1]
+            py = p_obj[2]
+            lx = -px if mir else px
+            ly = py
+            rad = math.radians(crot)
+            wx = cx + lx * math.cos(rad) - ly * math.sin(rad)
+            wy = cy + lx * math.sin(rad) + ly * math.cos(rad)
+        else:
+            pin_name = pin_idx_str
+            wx = cx
+            wy = cy
+
+        return [side, cmp_obj[0], pin_name, round(wx, 2), round(wy, 2), is_tp]
+
+    nets_raw = {}
+    cur_net = None
+    for line in eda_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        toks = line.split()
+        if toks[0] == "NET":
+            cur_net = toks[1] if len(toks) > 1 else "UNNAMED"
+            nets_raw[cur_net] = []
+        elif cur_net and toks[0] == "SNT" and len(toks) >= 5 and toks[1] == "TOP":
+            side_char = toks[2].upper()
+            try:
+                comp_idx = int(toks[3])
+                pin_idx_str = toks[4]
+                nets_raw[cur_net].append((side_char, comp_idx, pin_idx_str))
+            except ValueError:
+                pass
+
+    for n_name, p_list in nets_raw.items():
+        if not p_list:
+            continue
+        resolved = []
+        xs, ys = [], []
+        for s_char, c_idx, p_idx in p_list:
+            cmp_obj = None
+            if s_char == "T" and c_idx < len(top_components):
+                cmp_obj = top_components[c_idx]
+            elif s_char == "B" and c_idx < len(bot_components):
+                cmp_obj = bot_components[c_idx]
+
+            if cmp_obj:
+                r = resolve_pin_pos(cmp_obj, p_idx)
+                resolved.append(r)
+                xs.append(r[3])
+                ys.append(r[4])
+                c_ref = cmp_obj[0]
+                if c_ref not in comp_nets:
+                    comp_nets[c_ref] = []
+                if n_name not in comp_nets[c_ref]:
+                    comp_nets[c_ref].append(n_name)
+
+        if resolved:
+            bbox = [round(min(xs), 2), round(min(ys), 2), round(max(xs), 2), round(max(ys), 2)]
+            final_nets.append([n_name, resolved, bbox])
+
+    final_nets.sort(key=lambda n: n[0].lower())
+    return final_nets, comp_nets
+
+
 def parse_odb_profile(profile_text):
     """Parses profile outer island loops and cutouts, maintaining native circular arcs."""
     coord_scale, _ = get_unit_scale_to_mm(profile_text)
@@ -782,7 +880,7 @@ def build_viewer_html(board_data):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PCB Investigator - ODB++ HTML5 Interactive Viewer</title>
+<title>ODB++ Interactive Board Explorer</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
@@ -810,7 +908,7 @@ def build_viewer_html(board_data):
     display: block;
   }}
   #sidebar {{
-    width: 320px;
+    width: 340px;
     background: #0d1015;
     border-left: 1px solid #1a202c;
     display: flex;
@@ -819,12 +917,12 @@ def build_viewer_html(board_data):
     box-shadow: -4px 0 16px rgba(0, 0, 0, 0.5);
   }}
   .header {{
-    padding: 14px 16px 10px;
+    padding: 12px 14px 8px;
     border-bottom: 1px solid #1a202c;
     background: #0f131a;
   }}
   .header h1 {{
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 700;
     letter-spacing: 0.5px;
     color: #e5c07b;
@@ -843,10 +941,10 @@ def build_viewer_html(board_data):
   .header .info {{
     font-size: 11px;
     color: #5c6370;
-    margin-top: 4px;
+    margin-top: 3px;
   }}
   .search-bar {{
-    padding: 10px 12px;
+    padding: 8px 10px;
     border-bottom: 1px solid #1a202c;
     background: #0b0e13;
     display: flex;
@@ -859,7 +957,7 @@ def build_viewer_html(board_data):
     color: #fff;
     padding: 6px 10px;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: 11.5px;
     outline: none;
     transition: border-color 0.2s;
   }}
@@ -871,10 +969,10 @@ def build_viewer_html(board_data):
     color: #4b5263;
   }}
   .controls-bar {{
-    padding: 8px 12px;
+    padding: 6px 10px;
     border-bottom: 1px solid #1a202c;
     display: flex;
-    gap: 6px;
+    gap: 5px;
     flex-wrap: wrap;
     background: #0b0e13;
   }}
@@ -882,7 +980,7 @@ def build_viewer_html(board_data):
     background: #181e29;
     border: 1px solid #283141;
     color: #abb2bf;
-    padding: 5px 10px;
+    padding: 5px 9px;
     border-radius: 4px;
     font-size: 11px;
     cursor: pointer;
@@ -898,6 +996,294 @@ def build_viewer_html(board_data):
     background: #1e3a5f;
     border-color: #61afef;
     color: #61afef;
+  }}
+  .sidebar-tabs {{
+    display: flex;
+    border-bottom: 1px solid #1a202c;
+    background: #090c10;
+  }}
+  .tab-btn {{
+    flex: 1;
+    padding: 8px 2px 6px;
+    font-size: 10.5px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: #687487;
+    cursor: pointer;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    font-weight: 600;
+    transition: all 0.15s;
+  }}
+  .tab-btn:hover {{
+    color: #abb2bf;
+    background: #111620;
+  }}
+  .tab-btn.active {{
+    color: #61afef;
+    border-bottom-color: #61afef;
+    background: #0f141e;
+  }}
+  .tab-badge {{
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 8px;
+    background: #171d27;
+    color: #7f8a9e;
+    font-weight: 500;
+  }}
+  .tab-btn.active .tab-badge {{
+    background: #19324d;
+    color: #61afef;
+    font-weight: 700;
+  }}
+  .tab-pane {{
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    overflow: hidden;
+  }}
+  .tab-pane.active {{
+    display: flex;
+  }}
+  .tab-filter-bar {{
+    padding: 7px 10px;
+    background: #0b0e13;
+    border-bottom: 1px solid #1a202c;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }}
+  .tab-filter-bar input {{
+    background: #151922;
+    border: 1px solid #283141;
+    color: #fff;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    outline: none;
+    transition: border-color 0.2s;
+  }}
+  .tab-filter-bar input:focus {{
+    border-color: #61afef;
+    background: #181d28;
+  }}
+  .tab-filter-bar input::placeholder {{
+    color: #4b5263;
+  }}
+  .filter-chips {{
+    display: flex;
+    gap: 4px;
+  }}
+  .chip {{
+    font-size: 9.5px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: #131720;
+    border: 1px solid #232c3d;
+    color: #788396;
+    cursor: pointer;
+    font-weight: 600;
+  }}
+  .chip:hover {{
+    color: #abb2bf;
+    background: #1c2331;
+  }}
+  .chip.active {{
+    background: #1e3a5f;
+    border-color: #61afef;
+    color: #61afef;
+  }}
+  .list-counter {{
+    padding: 4px 10px;
+    font-size: 9.5px;
+    color: #5c6370;
+    background: #080a0f;
+    border-bottom: 1px solid #141820;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  .scroll-list {{
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 6px;
+  }}
+  .list-item {{
+    padding: 6px 8px;
+    margin-bottom: 3px;
+    border-radius: 4px;
+    background: #11151e;
+    border: 1px solid #1b212c;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    transition: all 0.15s;
+  }}
+  .list-item:hover {{
+    background: #161c28;
+    border-color: #2b3648;
+  }}
+  .list-item.selected {{
+    background: #142236;
+    border-color: #61afef;
+    box-shadow: 0 0 6px rgba(97, 175, 239, 0.25);
+  }}
+  .list-item.selected-tp {{
+    background: #0c232f;
+    border-color: #00e5ff;
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.25);
+  }}
+  .list-item.selected-trace {{
+    background: #242113;
+    border-color: #e5c07b;
+    box-shadow: 0 0 6px rgba(229, 192, 123, 0.25);
+  }}
+  .item-row {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  .item-title {{
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }}
+  .item-title.tp {{
+    color: #00e5ff;
+    font-family: monospace;
+  }}
+  .item-title.trace {{
+    color: #e5c07b;
+    font-family: monospace;
+    font-size: 11px;
+  }}
+  .item-desc {{
+    font-size: 10px;
+    color: #6d7788;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }}
+  .item-badge {{
+    font-size: 8.5px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-weight: 600;
+    font-family: monospace;
+  }}
+  .badge-pins {{ background: #222d3d; color: #61afef; }}
+  .badge-net {{ background: #2f2716; color: #e5c07b; }}
+  .badge-tp-count {{ background: #13333b; color: #00e5ff; }}
+  .inspector-card {{
+    margin: 6px;
+    padding: 9px 11px;
+    border-radius: 5px;
+    background: #0f1622;
+    border: 1px solid #23364f;
+    font-size: 11px;
+    color: #abb2bf;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }}
+  .inspector-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #1c2738;
+    padding-bottom: 4px;
+  }}
+  .inspector-header h3 {{
+    font-size: 12px;
+    color: #fff;
+    font-weight: 700;
+  }}
+  .inspector-btn-close {{
+    background: transparent;
+    border: none;
+    color: #5c6370;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 2px;
+  }}
+  .inspector-btn-close:hover {{
+    color: #fff;
+  }}
+  .inspector-detail {{
+    font-size: 10.5px;
+    color: #8c97aa;
+    line-height: 1.4;
+  }}
+  .inspector-detail strong {{
+    color: #c8d1e0;
+  }}
+  .inspector-chips {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 3px;
+    max-height: 80px;
+    overflow-y: auto;
+  }}
+  .node-chip {{
+    font-size: 9.5px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: #182333;
+    border: 1px solid #263852;
+    color: #61afef;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.1s;
+  }}
+  .node-chip:hover {{
+    background: #61afef;
+    color: #000;
+  }}
+  .node-chip.tp {{
+    background: #0c232f;
+    border-color: #00e5ff;
+    color: #00e5ff;
+  }}
+  .node-chip.tp:hover {{
+    background: #00e5ff;
+    color: #000;
+  }}
+  .node-chip.trace {{
+    background: #252014;
+    border-color: #e5c07b;
+    color: #e5c07b;
+  }}
+  .node-chip.trace:hover {{
+    background: #e5c07b;
+    color: #000;
+  }}
+  .load-more-btn {{
+    width: 100%;
+    margin: 4px 0 2px;
+    padding: 5px;
+    font-size: 10px;
+    background: #151b26;
+    border: 1px dashed #263347;
+    color: #788599;
+  }}
+  .load-more-btn:hover {{
+    background: #1b2333;
+    color: #fff;
+    border-color: #61afef;
   }}
   .layer-list {{
     flex: 1;
@@ -1043,11 +1429,11 @@ def build_viewer_html(board_data):
 
   <div id="sidebar">
     <div class="header">
-      <h1>PCB Investigator <span class="badge">PRO</span></h1>
+      <h1>ODB++ Explorer <span class="badge">PRO</span></h1>
       <div class="info" id="step-info">ODB++ Step: --</div>
     </div>
     <div class="search-bar">
-      <input type="text" id="comp-search" placeholder="Search RefDes (e.g. U5101, TR6500_LW, TP8051)...">
+      <input type="text" id="comp-search" placeholder="Quick Search (RefDes, TP, Net)...">
       <button id="btn-search-clear">Clear</button>
     </div>
     <div class="controls-bar">
@@ -1056,7 +1442,64 @@ def build_viewer_html(board_data):
       <button id="btn-bot" title="Bottom View">Bottom View</button>
       <button id="btn-mirror" title="Toggle Horizontal Mirror (M)">Mirror X (M)</button>
     </div>
-    <div class="layer-list" id="layerList"></div>
+
+    <div class="sidebar-tabs">
+      <button class="tab-btn active" data-tab="tab-layers" id="tab-btn-layers">Layers <span class="tab-badge" id="badge-layers">0</span></button>
+      <button class="tab-btn" data-tab="tab-comps" id="tab-btn-comps">Components <span class="tab-badge" id="badge-comps">0</span></button>
+      <button class="tab-btn" data-tab="tab-tps" id="tab-btn-tps">Test Points <span class="tab-badge" id="badge-tps">0</span></button>
+      <button class="tab-btn" data-tab="tab-traces" id="tab-btn-traces">Traces <span class="tab-badge" id="badge-traces">0</span></button>
+    </div>
+
+    <!-- Tab 1: Layers -->
+    <div class="tab-pane active" id="tab-layers">
+      <div class="layer-list" id="layerList"></div>
+    </div>
+
+    <!-- Tab 2: Components -->
+    <div class="tab-pane" id="tab-comps">
+      <div class="tab-filter-bar">
+        <input type="text" id="filter-comps" placeholder="Filter by RefDes, part, package...">
+        <div class="filter-chips" id="chips-comps">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="top">Top</button>
+          <button class="chip" data-filter="bot">Bottom</button>
+          <button class="chip" data-filter="ic">ICs</button>
+        </div>
+      </div>
+      <div class="list-counter" id="counter-comps">Showing 0 of 0</div>
+      <div class="inspector-card" id="inspector-comp" style="display:none;"></div>
+      <div class="scroll-list" id="list-comps"></div>
+    </div>
+
+    <!-- Tab 3: Test Points -->
+    <div class="tab-pane" id="tab-tps">
+      <div class="tab-filter-bar">
+        <input type="text" id="filter-tps" placeholder="Filter by TP name or net...">
+        <div class="filter-chips" id="chips-tps">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="top">Top</button>
+          <button class="chip" data-filter="bot">Bottom</button>
+        </div>
+      </div>
+      <div class="list-counter" id="counter-tps">Showing 0 of 0</div>
+      <div class="inspector-card" id="inspector-tp" style="display:none;"></div>
+      <div class="scroll-list" id="list-tps"></div>
+    </div>
+
+    <!-- Tab 4: Traces (Nets) -->
+    <div class="tab-pane" id="tab-traces">
+      <div class="tab-filter-bar">
+        <input type="text" id="filter-traces" placeholder="Filter by trace / net name...">
+        <div class="filter-chips" id="chips-traces">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="multi">Multi-Pin</button>
+          <button class="chip" data-filter="tp">Has TP</button>
+        </div>
+      </div>
+      <div class="list-counter" id="counter-traces">Showing 0 of 0</div>
+      <div class="inspector-card" id="inspector-trace" style="display:none;"></div>
+      <div class="scroll-list" id="list-traces"></div>
+    </div>
   </div>
 
 <script>
@@ -1086,7 +1529,17 @@ let dragStartY = 0;
 let measureP1 = null;
 let measureP2 = null;
 let searchTarget = null;
+let selectedComp = null;
+let selectedTP = null;
+let selectedNet = null;
+let activeTab = 'tab-layers';
 let renderRequested = false;
+
+const compMap = new Map();
+const tpMap = new Map();
+const netMap = new Map();
+const compNetMap = new Map();
+const netTPMap = new Map();
 
 const compConfig = {{
   showPackages: true,
@@ -1249,7 +1702,53 @@ function onDataReady(data) {{
   }}
 
   document.getElementById('loader').style.display = 'none';
+
+  // Index components, test points, and nets
+  compMap.clear();
+  tpMap.clear();
+  netMap.clear();
+  compNetMap.clear();
+  netTPMap.clear();
+
+  if (board.components) {{
+    for (const c of board.components) {{
+      const ref = c[0];
+      compMap.set(ref.toLowerCase(), c);
+      if (c[10] === 1) {{
+        tpMap.set(ref.toLowerCase(), c);
+      }}
+    }}
+  }}
+
+  if (board.nets) {{
+    for (const n of board.nets) {{
+      const nName = n[0];
+      netMap.set(nName.toLowerCase(), n);
+      const tps = [];
+      for (const p of n[1]) {{
+        const pref = p[1];
+        if (p[5] === 1) tps.push(pref);
+        let list = compNetMap.get(pref.toUpperCase());
+        if (!list) {{
+          list = [];
+          compNetMap.set(pref.toUpperCase(), list);
+        }}
+        if (!list.includes(nName)) list.push(nName);
+      }}
+      if (tps.length > 0) netTPMap.set(nName.toLowerCase(), tps);
+    }}
+  }}
+
+  // Update tab badge counters
+  document.getElementById('badge-layers').textContent = board.layers ? board.layers.length : 0;
+  const tpCount = board.components ? board.components.filter(c => c[10] === 1).length : 0;
+  const stdCount = board.components ? (board.components.length - tpCount) : 0;
+  document.getElementById('badge-comps').textContent = stdCount;
+  document.getElementById('badge-tps').textContent = tpCount;
+  document.getElementById('badge-traces').textContent = board.nets ? board.nets.length : 0;
+
   buildLayerList();
+  initTabsAndLists();
   resize();
   fitBoard();
 }}
@@ -1337,7 +1836,7 @@ function render() {{
     ctx.fill(board.profile.path, 'evenodd');
   }}
 
-  // 2. Hardware-Accelerated Vector Layers (PCB Investigator Palette)
+  // 2. Hardware-Accelerated Vector Layers (EDA Color Palette)
   ctx.lineCap = 'square';
   ctx.lineJoin = 'miter';
 
@@ -1573,6 +2072,63 @@ function render() {{
     }}
   }}
 
+  // 3b. Selected Trace / Net Pin & Flight-Line Highlights
+  if (selectedNet && selectedNet[1] && selectedNet[1].length > 0) {{
+    const curSideCode = mirrorX ? 1 : 0;
+    const netPins = selectedNet[1];
+
+    // Flight-lines connecting nodes
+    ctx.save();
+    ctx.strokeStyle = '#ffe600';
+    ctx.lineWidth = Math.max(0.25, 1.8 / scale);
+    ctx.setLineDash([4 / scale, 3 / scale]);
+    ctx.beginPath();
+    let first = true;
+    for (const p of netPins) {{
+      const [pside, pref, pname, wx, wy] = p;
+      if (first) {{
+        ctx.moveTo(wx, wy);
+        first = false;
+      }} else {{
+        ctx.lineTo(wx, wy);
+      }}
+    }}
+    ctx.stroke();
+    ctx.restore();
+
+    // Node circles and labels
+    for (const p of netPins) {{
+      const [pside, pref, pname, wx, wy, isTp] = p;
+      const isCurSide = (pside === curSideCode);
+
+      ctx.save();
+      ctx.translate(wx, wy);
+
+      ctx.strokeStyle = isTp ? '#00e5ff' : '#ffe600';
+      ctx.fillStyle = isTp ? 'rgba(0, 229, 255, 0.45)' : 'rgba(255, 230, 0, 0.45)';
+      ctx.lineWidth = Math.max(0.25, 2.0 / scale);
+
+      const r = isTp ? 1.0 : 0.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      if (isCurSide && scale * 1.5 >= 14) {{
+        ctx.scale(mirrorX ? -1 : 1, -1);
+        const FONT_RES = 64;
+        ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+        ctx.font = `bold ${{Math.round(1.1 * FONT_RES)}}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = isTp ? '#00e5ff' : '#ffe600';
+        ctx.fillText(`${{pref}}.${{pname}}`, 0, -r * FONT_RES - 2);
+      }}
+
+      ctx.restore();
+    }}
+  }}
+
   // 4. Board Boundary Edge Outline
   if (board.profile && board.profile.visible && board.profile.path) {{
     ctx.strokeStyle = board.profile.color;
@@ -1751,76 +2307,602 @@ function buildLayerList() {{
 const btnTop = document.getElementById('btn-top');
 const btnBot = document.getElementById('btn-bot');
 
+function setViewSide(targetSide) {{
+  if (targetSide === 'TOP' && mirrorX) {{
+    mirrorX = false;
+    btnTop.classList.add('active');
+    btnBot.classList.remove('active');
+    board.layers.forEach(l => {{
+      if (l.side === 'TOP') {{
+        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+      }} else if (l.side === 'BOTTOM' || l.side === 'INNER') {{
+        l.visible = false;
+      }}
+    }});
+    buildLayerList();
+  }} else if (targetSide === 'BOTTOM' && !mirrorX) {{
+    mirrorX = true;
+    btnBot.classList.add('active');
+    btnTop.classList.remove('active');
+    board.layers.forEach(l => {{
+      if (l.side === 'BOTTOM') {{
+        l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
+      }} else if (l.side === 'TOP' || l.side === 'INNER') {{
+        l.visible = false;
+      }}
+    }});
+    buildLayerList();
+  }}
+}}
+
 btnTop.addEventListener('click', () => {{
-  mirrorX = false;
-  btnTop.classList.add('active');
-  btnBot.classList.remove('active');
-  board.layers.forEach(l => {{
-    if (l.side === 'TOP') {{
-      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
-    }} else if (l.side === 'BOTTOM' || l.side === 'INNER') {{
-      l.visible = false;
-    }}
-  }});
-  buildLayerList();
+  setViewSide('TOP');
   fitBoard();
 }});
 
 btnBot.addEventListener('click', () => {{
-  mirrorX = true;
-  btnBot.classList.add('active');
-  btnTop.classList.remove('active');
-  board.layers.forEach(l => {{
-    if (l.side === 'BOTTOM') {{
-      l.visible = (l.type === 'SIGNAL' || l.type === 'SOLDER_MASK' || l.type === 'SILK_SCREEN');
-    }} else if (l.side === 'TOP' || l.side === 'INNER') {{
-      l.visible = false;
-    }}
-  }});
-  buildLayerList();
+  setViewSide('BOTTOM');
   fitBoard();
 }});
 
-// RefDes Search & Instant Focus
+function switchTab(tabId) {{
+  activeTab = tabId;
+  document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(btn => {{
+    btn.classList.toggle('active', btn.dataset.tab === tabId);
+  }});
+  document.querySelectorAll('.tab-pane').forEach(pane => {{
+    pane.classList.toggle('active', pane.id === tabId);
+  }});
+}}
+
+// -------------------------------------------------------------
+// Component Selection & List
+// -------------------------------------------------------------
+let compFilterText = '';
+let compFilterSide = 'all';
+let compRenderLimit = 80;
+
+function filterComponents() {{
+  if (!board || !board.components) return [];
+  const q = compFilterText.toLowerCase();
+  return board.components.filter(c => {{
+    if (c[10] === 1) return false;
+    const side = c[7] === 0 ? 'top' : 'bot';
+    if (compFilterSide === 'top' && side !== 'top') return false;
+    if (compFilterSide === 'bot' && side !== 'bot') return false;
+    if (compFilterSide === 'ic' && c[11] !== 1) return false;
+    if (!q) return true;
+    const ref = c[0].toLowerCase();
+    const part = (c[8] || '').toLowerCase();
+    return ref.includes(q) || part.includes(q);
+  }});
+}}
+
+function renderCompList() {{
+  const container = document.getElementById('list-comps');
+  const counter = document.getElementById('counter-comps');
+  const items = filterComponents();
+  const total = items.length;
+  const showing = Math.min(total, compRenderLimit);
+  counter.textContent = `Showing ${{showing}} of ${{total}} components`;
+
+  container.innerHTML = '';
+  const slice = items.slice(0, showing);
+  for (const c of slice) {{
+    const ref = c[0];
+    const isSel = selectedComp && selectedComp[0] === ref;
+    const side = c[7] === 0 ? 'TOP' : 'BOT';
+    const sideClass = c[7] === 0 ? 'badge-top' : 'badge-bot';
+    const part = c[8] || (c[11] === 1 ? 'IC Package' : 'SMD');
+    const pinCount = c[9] ? c[9].length : 0;
+
+    const row = document.createElement('div');
+    row.className = `list-item ${{isSel ? 'selected' : ''}}`;
+    row.innerHTML = `
+      <div class="item-row">
+        <span class="item-title">${{ref}}</span>
+        <span class="layer-side-badge ${{sideClass}}">${{side}}</span>
+      </div>
+      <div class="item-desc">
+        <span>${{part}}</span>
+        ${{pinCount > 0 ? `<span class="item-badge badge-pins">${{pinCount}}P</span>` : ''}}
+      </div>
+    `;
+    row.addEventListener('click', () => selectComponent(c));
+    container.appendChild(row);
+  }}
+
+  if (total > showing) {{
+    const btn = document.createElement('button');
+    btn.className = 'load-more-btn';
+    btn.textContent = `Load More (${{total - showing}} remaining)...`;
+    btn.addEventListener('click', () => {{
+      compRenderLimit += 80;
+      renderCompList();
+    }});
+    container.appendChild(btn);
+  }}
+}}
+
+function selectComponent(c) {{
+  selectedComp = c;
+  selectedTP = null;
+  searchTarget = c[0];
+  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+  setViewSide(side);
+
+  const pxc = c[12] || 0;
+  const pyc = c[13] || 0;
+  const cx = c[1] + pxc;
+  const cy = c[2] + pyc;
+  const cw = c[3];
+  const ch = c[4];
+
+  const fitScale = Math.min((canvas.width * 0.35) / Math.max(cw, 2.0), (canvas.height * 0.35) / Math.max(ch, 2.0));
+  scale = Math.max(scale, Math.min(fitScale, 20.0 * window.devicePixelRatio));
+  panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
+  panY = canvas.height / 2 + cy * scale;
+
+  const insp = document.getElementById('inspector-comp');
+  insp.style.display = 'flex';
+  const nets = compNetMap.get(c[0].toUpperCase()) || [];
+  insp.innerHTML = `
+    <div class="inspector-header">
+      <h3>${{c[0]}}</h3>
+      <button class="inspector-btn-close" id="close-comp-insp">✕</button>
+    </div>
+    <div class="inspector-detail">
+      <strong>Side:</strong> ${{side}} | <strong>Pos:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
+      <strong>Size:</strong> ${{cw.toFixed(2)}} × ${{ch.toFixed(2)}} mm | <strong>Pins:</strong> ${{c[9] ? c[9].length : 0}}<br>
+      ${{c[8] ? `<strong>Part:</strong> ${{c[8]}}<br>` : ''}}
+    </div>
+    ${{nets.length > 0 ? `
+      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACES:</div>
+      <div class="inspector-chips">
+        ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">${{n}}</span>`).join('')}}
+      </div>
+    ` : ''}}
+  `;
+  insp.querySelector('#close-comp-insp').addEventListener('click', () => {{
+    insp.style.display = 'none';
+    selectedComp = null;
+    searchTarget = null;
+    scheduleRender();
+  }});
+  insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const netObj = netMap.get(chip.dataset.net.toLowerCase());
+      if (netObj) {{
+        switchTab('tab-traces');
+        selectTrace(netObj);
+      }}
+    }});
+  }});
+
+  renderCompList();
+  scheduleRender();
+}}
+
+// -------------------------------------------------------------
+// Test Point Selection & List
+// -------------------------------------------------------------
+let tpFilterText = '';
+let tpFilterSide = 'all';
+let tpRenderLimit = 80;
+
+function filterTestPoints() {{
+  if (!board || !board.components) return [];
+  const q = tpFilterText.toLowerCase();
+  return board.components.filter(c => {{
+    if (c[10] !== 1) return false;
+    const side = c[7] === 0 ? 'top' : 'bot';
+    if (tpFilterSide === 'top' && side !== 'top') return false;
+    if (tpFilterSide === 'bot' && side !== 'bot') return false;
+    if (!q) return true;
+    const ref = c[0].toLowerCase();
+    const nets = (compNetMap.get(c[0].toUpperCase()) || []).join(' ').toLowerCase();
+    return ref.includes(q) || nets.includes(q);
+  }});
+}}
+
+function renderTPList() {{
+  const container = document.getElementById('list-tps');
+  const counter = document.getElementById('counter-tps');
+  const items = filterTestPoints();
+  const total = items.length;
+  const showing = Math.min(total, tpRenderLimit);
+  counter.textContent = `Showing ${{showing}} of ${{total}} test points`;
+
+  container.innerHTML = '';
+  const slice = items.slice(0, showing);
+  for (const c of slice) {{
+    const ref = c[0];
+    const isSel = selectedTP && selectedTP[0] === ref;
+    const side = c[7] === 0 ? 'TOP' : 'BOT';
+    const sideClass = c[7] === 0 ? 'badge-top' : 'badge-bot';
+    const nets = compNetMap.get(ref.toUpperCase()) || [];
+    const netName = nets.length > 0 ? nets[0] : null;
+
+    const row = document.createElement('div');
+    row.className = `list-item ${{isSel ? 'selected-tp' : ''}}`;
+    row.innerHTML = `
+      <div class="item-row">
+        <span class="item-title tp">${{ref}}</span>
+        <span class="layer-side-badge ${{sideClass}}">${{side}}</span>
+      </div>
+      <div class="item-desc">
+        <span>(${{c[1].toFixed(1)}}, ${{c[2].toFixed(1)}})</span>
+        ${{netName ? `<span class="item-badge badge-net" title="Net: ${{netName}}">${{netName}}</span>` : ''}}
+      </div>
+    `;
+    row.addEventListener('click', () => selectTestPoint(c));
+    container.appendChild(row);
+  }}
+
+  if (total > showing) {{
+    const btn = document.createElement('button');
+    btn.className = 'load-more-btn';
+    btn.textContent = `Load More (${{total - showing}} remaining)...`;
+    btn.addEventListener('click', () => {{
+      tpRenderLimit += 80;
+      renderTPList();
+    }});
+    container.appendChild(btn);
+  }}
+}}
+
+function selectTestPoint(c) {{
+  selectedTP = c;
+  selectedComp = null;
+  searchTarget = c[0];
+  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+  setViewSide(side);
+
+  scale = Math.max(scale, 16.0 * window.devicePixelRatio);
+  panX = canvas.width / 2 - (mirrorX ? -c[1] : c[1]) * scale;
+  panY = canvas.height / 2 + c[2] * scale;
+
+  const insp = document.getElementById('inspector-tp');
+  insp.style.display = 'flex';
+  const nets = compNetMap.get(c[0].toUpperCase()) || [];
+  insp.innerHTML = `
+    <div class="inspector-header">
+      <h3 style="color:#00e5ff">${{c[0]}}</h3>
+      <button class="inspector-btn-close" id="close-tp-insp">✕</button>
+    </div>
+    <div class="inspector-detail">
+      <strong>Side:</strong> ${{side}} | <strong>Position:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
+      <strong>Type:</strong> Test Point (SMD Pad)
+    </div>
+    ${{nets.length > 0 ? `
+      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACE:</div>
+      <div class="inspector-chips">
+        ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">🔍 ${{n}}</span>`).join('')}}
+      </div>
+    ` : ''}}
+  `;
+  insp.querySelector('#close-tp-insp').addEventListener('click', () => {{
+    insp.style.display = 'none';
+    selectedTP = null;
+    searchTarget = null;
+    scheduleRender();
+  }});
+  insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const netObj = netMap.get(chip.dataset.net.toLowerCase());
+      if (netObj) {{
+        switchTab('tab-traces');
+        selectTrace(netObj);
+      }}
+    }});
+  }});
+
+  renderTPList();
+  scheduleRender();
+}}
+
+// -------------------------------------------------------------
+// Trace (Net) Selection & List
+// -------------------------------------------------------------
+let traceFilterText = '';
+let traceFilterMode = 'all';
+let traceRenderLimit = 80;
+
+function filterTraces() {{
+  if (!board || !board.nets) return [];
+  const q = traceFilterText.toLowerCase();
+  return board.nets.filter(n => {{
+    const name = n[0];
+    const pins = n[1];
+    if (traceFilterMode === 'multi' && pins.length <= 1) return false;
+    if (traceFilterMode === 'tp' && !pins.some(p => p[5] === 1)) return false;
+    if (!q) return true;
+    return name.toLowerCase().includes(q);
+  }});
+}}
+
+function renderTraceList() {{
+  const container = document.getElementById('list-traces');
+  const counter = document.getElementById('counter-traces');
+  const items = filterTraces();
+  const total = items.length;
+  const showing = Math.min(total, traceRenderLimit);
+  counter.textContent = `Showing ${{showing}} of ${{total}} traces`;
+
+  container.innerHTML = '';
+  const slice = items.slice(0, showing);
+  for (const n of slice) {{
+    const name = n[0];
+    const isSel = selectedNet && selectedNet[0] === name;
+    const pins = n[1];
+    const pinCount = pins.length;
+    const tpCount = pins.filter(p => p[5] === 1).length;
+    const hasTop = pins.some(p => p[0] === 0);
+    const hasBot = pins.some(p => p[0] === 1);
+    const sideLabel = (hasTop && hasBot) ? 'BOTH' : (hasTop ? 'TOP' : 'BOT');
+    const sideClass = (hasTop && hasBot) ? 'badge-inner' : (hasTop ? 'badge-top' : 'badge-bot');
+
+    const row = document.createElement('div');
+    row.className = `list-item ${{isSel ? 'selected-trace' : ''}}`;
+    row.innerHTML = `
+      <div class="item-row">
+        <span class="item-title trace">${{name}}</span>
+        <span class="layer-side-badge ${{sideClass}}">${{sideLabel}}</span>
+      </div>
+      <div class="item-desc">
+        <span class="item-badge badge-pins">${{pinCount}} Pin${{pinCount !== 1 ? 's' : ''}}</span>
+        ${{tpCount > 0 ? `<span class="item-badge badge-tp-count">${{tpCount}} TP</span>` : ''}}
+      </div>
+    `;
+    row.addEventListener('click', () => selectTrace(n));
+    container.appendChild(row);
+  }}
+
+  if (total > showing) {{
+    const btn = document.createElement('button');
+    btn.className = 'load-more-btn';
+    btn.textContent = `Load More (${{total - showing}} remaining)...`;
+    btn.addEventListener('click', () => {{
+      traceRenderLimit += 80;
+      renderTraceList();
+    }});
+    container.appendChild(btn);
+  }}
+}}
+
+function selectTrace(net) {{
+  selectedNet = net;
+  const name = net[0];
+  const pins = net[1];
+  const bbox = net[2];
+
+  const topCount = pins.filter(p => p[0] === 0).length;
+  const botCount = pins.filter(p => p[0] === 1).length;
+  if (topCount >= botCount && mirrorX) {{
+    setViewSide('TOP');
+  }} else if (botCount > topCount && !mirrorX) {{
+    setViewSide('BOTTOM');
+  }}
+
+  const [minX, minY, maxX, maxY] = bbox;
+  const bW = Math.max(maxX - minX, 10.0);
+  const bH = Math.max(maxY - minY, 10.0);
+  const pad = 64 * window.devicePixelRatio;
+  scale = Math.min((canvas.width - pad * 2) / bW, (canvas.height - pad * 2) / bH);
+  scale = Math.min(Math.max(scale, 2.0 * window.devicePixelRatio), 24.0 * window.devicePixelRatio);
+
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  panX = canvas.width / 2 - (mirrorX ? -midX : midX) * scale;
+  panY = canvas.height / 2 + midY * scale;
+
+  const insp = document.getElementById('inspector-trace');
+  insp.style.display = 'flex';
+  const tps = pins.filter(p => p[5] === 1);
+  const comps = pins.filter(p => p[5] === 0);
+
+  insp.innerHTML = `
+    <div class="inspector-header">
+      <h3 style="color:#e5c07b">${{name}}</h3>
+      <button class="inspector-btn-close" id="close-trace-insp">✕</button>
+    </div>
+    <div class="inspector-detail">
+      <strong>Total Nodes:</strong> ${{pins.length}} (${{comps.length}} Component Pins, ${{tps.length}} Test Points)
+    </div>
+    ${{tps.length > 0 ? `
+      <div style="font-size:10px; color:#00e5ff; margin-top:2px;">TEST POINTS ON TRACE:</div>
+      <div class="inspector-chips">
+        ${{tps.map(p => `<span class="node-chip tp" data-ref="${{p[1]}}">🎯 ${{p[1]}}</span>`).join('')}}
+      </div>
+    ` : ''}}
+    ${{comps.length > 0 ? `
+      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED COMPONENT PINS:</div>
+      <div class="inspector-chips">
+        ${{comps.map(p => `<span class="node-chip" data-ref="${{p[1]}}">${{p[1]}}.${{p[2]}}</span>`).join('')}}
+      </div>
+    ` : ''}}
+  `;
+
+  insp.querySelector('#close-trace-insp').addEventListener('click', () => {{
+    insp.style.display = 'none';
+    selectedNet = null;
+    scheduleRender();
+  }});
+
+  insp.querySelectorAll('.node-chip.tp').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const tpObj = tpMap.get(chip.dataset.ref.toLowerCase());
+      if (tpObj) {{
+        switchTab('tab-tps');
+        selectTestPoint(tpObj);
+      }}
+    }});
+  }});
+
+  insp.querySelectorAll('.node-chip:not(.tp)').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const cmpObj = compMap.get(chip.dataset.ref.toLowerCase());
+      if (cmpObj) {{
+        switchTab('tab-comps');
+        selectComponent(cmpObj);
+      }}
+    }});
+  }});
+
+  renderTraceList();
+  scheduleRender();
+}}
+
+// -------------------------------------------------------------
+// Initialize Tabs, Filters, and Listeners
+// -------------------------------------------------------------
+function initTabsAndLists() {{
+  document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(btn => {{
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  }});
+
+  const compInput = document.getElementById('filter-comps');
+  compInput.addEventListener('input', e => {{
+    compFilterText = e.target.value.trim();
+    compRenderLimit = 80;
+    renderCompList();
+  }});
+  document.querySelectorAll('#chips-comps .chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      document.querySelectorAll('#chips-comps .chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      compFilterSide = chip.dataset.filter;
+      compRenderLimit = 80;
+      renderCompList();
+    }});
+  }});
+
+  const tpInput = document.getElementById('filter-tps');
+  tpInput.addEventListener('input', e => {{
+    tpFilterText = e.target.value.trim();
+    tpRenderLimit = 80;
+    renderTPList();
+  }});
+  document.querySelectorAll('#chips-tps .chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      document.querySelectorAll('#chips-tps .chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      tpFilterSide = chip.dataset.filter;
+      tpRenderLimit = 80;
+      renderTPList();
+    }});
+  }});
+
+  const traceInput = document.getElementById('filter-traces');
+  traceInput.addEventListener('input', e => {{
+    traceFilterText = e.target.value.trim();
+    traceRenderLimit = 80;
+    renderTraceList();
+  }});
+  document.querySelectorAll('#chips-traces .chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      document.querySelectorAll('#chips-traces .chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      traceFilterMode = chip.dataset.filter;
+      traceRenderLimit = 80;
+      renderTraceList();
+    }});
+  }});
+
+  renderCompList();
+  renderTPList();
+  renderTraceList();
+}}
+
+// Global Quick Search (Cross-tab routing: TP, Comp, or Trace)
 compSearch.addEventListener('input', e => {{
   const query = e.target.value.trim();
-  if (query && board.components) {{
-    let match = board.components.find(c => c[0].toLowerCase() === query.toLowerCase());
-    if (!match && query.length >= 2) {{
-      match = board.components.find(c => c[0].toLowerCase().startsWith(query.toLowerCase()));
-    }}
-    if (match) {{
-      searchTarget = match[0];
-      const matchSide = match[7] === 0 ? 'TOP' : 'BOTTOM';
-      if ((matchSide === 'BOTTOM' && !mirrorX) || (matchSide === 'TOP' && mirrorX)) {{
-        mirrorX = (matchSide === 'BOTTOM');
-        if (mirrorX) {{
-          btnBot.classList.add('active');
-          btnTop.classList.remove('active');
-        }} else {{
-          btnTop.classList.add('active');
-          btnBot.classList.remove('active');
-        }}
-        buildLayerList();
-      }}
-
-      // Center smoothly on target
-      const targetScale = Math.max(scale, 18.0 * window.devicePixelRatio);
-      scale = targetScale;
-      panX = canvas.width / 2 - (mirrorX ? -match[1] : match[1]) * scale;
-      panY = canvas.height / 2 + match[2] * scale;
-    }} else {{
-      searchTarget = query;
-    }}
-  }} else {{
+  if (!query) {{
     searchTarget = null;
+    selectedComp = null;
+    selectedTP = null;
+    selectedNet = null;
+    scheduleRender();
+    return;
   }}
+
+  const qLower = query.toLowerCase();
+
+  // 1. Check if matching a test point
+  const tpMatch = tpMap.get(qLower);
+  if (tpMatch) {{
+    switchTab('tab-tps');
+    selectTestPoint(tpMatch);
+    return;
+  }}
+
+  // 2. Check if matching a component
+  const compMatch = compMap.get(qLower);
+  if (compMatch) {{
+    if (compMatch[10] === 1) {{
+      switchTab('tab-tps');
+      selectTestPoint(compMatch);
+    }} else {{
+      switchTab('tab-comps');
+      selectComponent(compMatch);
+    }}
+    return;
+  }}
+
+  // 3. Check if matching a net
+  const netMatch = netMap.get(qLower);
+  if (netMatch) {{
+    switchTab('tab-traces');
+    selectTrace(netMatch);
+    return;
+  }}
+
+  // Fallback prefix search
+  if (query.length >= 2) {{
+    for (const [k, v] of tpMap.entries()) {{
+      if (k.startsWith(qLower)) {{
+        switchTab('tab-tps');
+        selectTestPoint(v);
+        return;
+      }}
+    }}
+    for (const [k, v] of compMap.entries()) {{
+      if (k.startsWith(qLower)) {{
+        if (v[10] === 1) {{
+          switchTab('tab-tps');
+          selectTestPoint(v);
+        }} else {{
+          switchTab('tab-comps');
+          selectComponent(v);
+        }}
+        return;
+      }}
+    }}
+    for (const [k, v] of netMap.entries()) {{
+      if (k.startsWith(qLower)) {{
+        switchTab('tab-traces');
+        selectTrace(v);
+        return;
+      }}
+    }}
+  }}
+
+  searchTarget = query;
   scheduleRender();
 }});
 
 document.getElementById('btn-search-clear').addEventListener('click', () => {{
   compSearch.value = '';
   searchTarget = null;
+  selectedComp = null;
+  selectedTP = null;
+  selectedNet = null;
+  document.getElementById('inspector-comp').style.display = 'none';
+  document.getElementById('inspector-tp').style.display = 'none';
+  document.getElementById('inspector-trace').style.display = 'none';
+  renderCompList();
+  renderTPList();
+  renderTraceList();
   scheduleRender();
 }});
 
@@ -1924,7 +3006,16 @@ window.addEventListener('keydown', e => {{
     measureP2 = null;
     measureHud.style.display = 'none';
     searchTarget = null;
+    selectedComp = null;
+    selectedTP = null;
+    selectedNet = null;
     compSearch.value = '';
+    document.getElementById('inspector-comp').style.display = 'none';
+    document.getElementById('inspector-tp').style.display = 'none';
+    document.getElementById('inspector-trace').style.display = 'none';
+    renderCompList();
+    renderTPList();
+    renderTraceList();
     scheduleRender();
   }}
   if (e.key === 'Shift') {{
@@ -1947,7 +3038,7 @@ initData();
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Autonomous ODB++ to PCB Investigator-Grade HTML5 Standalone Viewer Compiler."
+        description="Autonomous ODB++ HTML5 Standalone Viewer Compiler."
     )
     parser.add_argument("odb_input", help="Path to ODB++ .zip, .tgz, .tar.gz, or extracted directory")
     parser.add_argument("-o", "--output", default="pcb_viewer.html", help="Output HTML file path")
@@ -1996,11 +3087,15 @@ def main():
 
     comp_top_raw, _ = read_file_from_source(args.odb_input, "comp_+_top/components", preferred_step=step)
     comp_bot_raw, _ = read_file_from_source(args.odb_input, "comp_+_bot/components", preferred_step=step)
-    components = (
-        parse_components_with_packages(comp_top_raw, packages, pkg_list, side="TOP") +
-        parse_components_with_packages(comp_bot_raw, packages, pkg_list, side="BOTTOM")
-    )
-    print(f"Extracted {len(components)} component footprints with pin geometries.")
+    top_components = parse_components_with_packages(comp_top_raw, packages, pkg_list, side="TOP")
+    bot_components = parse_components_with_packages(comp_bot_raw, packages, pkg_list, side="BOTTOM")
+    components = top_components + bot_components
+
+    # 4b. Parse Electrical Nets & Signal Connectivity
+    final_nets, comp_nets = parse_eda_nets(eda_content, top_components, bot_components)
+    tp_count = sum(1 for c in components if c[10] == 1)
+    std_comp_count = len(components) - tp_count
+    print(f"Extracted {len(components)} component footprints ({std_comp_count} components, {tp_count} test points) and {len(final_nets)} electrical nets.")
 
     # 5. Discover Layer Features for the Target Step
     norm_step = f"steps/{step.lower()}/layers/"
@@ -2097,7 +3192,7 @@ def main():
         if item_count == 0 and len(l_data["texts"]) == 0:
             continue
 
-        # Visual Palette Matching PCB Investigator
+        # Visual Palette Matching EDA Standards
         is_visible = False
         color = "#808080"
         order = 50
@@ -2175,6 +3270,7 @@ def main():
             "loops": outline_loops,
         },
         "components": components,
+        "nets": final_nets,
         "layers": parsed_layers,
     }
 

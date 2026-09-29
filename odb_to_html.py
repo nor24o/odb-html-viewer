@@ -1575,7 +1575,7 @@ def main():
         if item_count == 0 and len(l_data["texts"]) == 0:
             continue
 
-        # Color Palette matching PCB Investigator
+        # Color Palette matching EDA Standards
         is_visible = False
         color = "#808080"
         order = 50
