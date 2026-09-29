@@ -24,14 +24,14 @@ A single-file, zero-dependency Python script (`odb_viewer_compiler.py`) that par
 | Layer / Feature | Color | Styling Rules |
 | :--- | :--- | :--- |
 | **Substrate Body** | `#0a120c` | Deep dark green/black laminate core with native circular arc cutouts and `#e5c07b` outline edge. |
-| **Top Copper** | `#29663c` | Lighter emerald green traces and pours; line cap: `square`, line join: `miter`. |
-| **Bottom Copper** | `#1e3a5f` | Slate navy traces and pours. |
+| **Top Copper** | `#29663c` | Lighter emerald green traces and pours; line cap: `round`, line join: `round` matching circular aperture draws. |
+| **Bottom Copper** | `#1e3a5f` | Slate navy traces and pours; seamless filleted joints and 1-micron delta-encoded polygons. |
 | **Solder Pads & Vias** | `#c49c3e` | Warm Gold / ENIG SMT pads, circular via rings, and exposed test lands. |
 | **Component Courtyards** | `#00e5ff` | Electric cyan SMD boundary outlines. |
 | **SMT Pads & Pins** | `#ff2222` / `#00e5ff` | **Pin 1** distinctly filled and outlined in **Bright Red** (`#ff2222`); Pin 2+ outlined in Cyan (`#00e5ff`). |
 | **Test Points (`TP...`)** | `#e0f7fa` / `#00e5ff` | Strictly circular with light cyan fill and electric cyan border (no crosshairs or plus marks); RefDes centered inside in `#00363a`. |
-| **Silkscreen Text** | `#d9a738` | Amber gold physical silkscreen overlay. Suppresses internal copper net labels to prevent ghost letters. |
-| **Large IC RefDes** | `#ff9900` | Bold orange RefDes centered in IC bodies ($\ge 3.5\text{ mm}$ or `U...`/`TR...`), auto-rotated and right-side up. |
+| **Silkscreen Text** | `#d9a738` | Amber gold physical silkscreen overlay printed on substrate beneath component packages. |
+| **Component RefDes Overlay** | `#ffffff` / `#ffb347` | Crisp RefDes centered inside every component courtyard along primary axis, rendered OVER pads and copper with high-contrast dark backing pill and outline stroke. |
 
 ---
 
@@ -45,8 +45,8 @@ A single-file, zero-dependency Python script (`odb_viewer_compiler.py`) that par
 - **Shift+Drag Caliper Tool:** Holding `Shift` and dragging across the board draws a calibrated caliper displaying real-time millimeter $\Delta X$, $\Delta Y$, and direct point-to-point Euclidean distance in the HUD and inline over the line.
 - **Level of Detail (LOD):**
   - Silkscreen text suppressed when font on-screen height $< 4.0\text{ px}$.
-  - Test point internal labels suppressed when diameter $< 16\text{ px}$.
-  - Passive component generic centered RefDes suppressed to avoid silkscreen clutter.
+  - Test point internal labels suppressed when diameter $< 14\text{ px}$.
+  - Component in-courtyard RefDes rendered when on-screen font $\ge 6.0\text{ px}$ or when selected.
 
 ---
 

@@ -282,26 +282,60 @@ def parse_symbols(content, unit_name):
     return symbols
 
 
-def simplify_contour(pts, tol=0.025):
-    """Simplifies polyline coordinates by removing collinear points within spatial distance tolerance."""
+def simplify_contour(pts, tol_collinear=0.015, min_dist=0.002):
+    """
+    Simplifies polyline coordinates:
+    1. Removes consecutive duplicate points (< min_dist apart).
+    2. Removes intermediate collinear points without blunting corners or cutting spokes.
+    """
     if len(pts) <= 6:
         return pts
-    res = [pts[0], pts[1]]
-    tol_sq = tol * tol
-    for i in range(2, len(pts) - 2, 2):
+
+    # Pass 1: Deduplicate consecutive points
+    dedup = [pts[0], pts[1]]
+    min_dist_sq = min_dist * min_dist
+    for i in range(2, len(pts), 2):
         x, y = pts[i], pts[i+1]
-        dx = x - res[-2]
-        dy = y - res[-1]
-        if dx * dx + dy * dy >= tol_sq:
-            res.extend([x, y])
-    res.extend([pts[-2], pts[-1]])
+        dx = x - dedup[-2]
+        dy = y - dedup[-1]
+        if dx * dx + dy * dy >= min_dist_sq:
+            dedup.extend([x, y])
+
+    if len(dedup) <= 6:
+        return dedup
+
+    # Pass 2: Collinear point elimination
+    res = [dedup[0], dedup[1]]
+    tol_sq = tol_collinear * tol_collinear
+    for i in range(2, len(dedup) - 2, 2):
+        x2, y2 = dedup[i], dedup[i+1]
+        x1, y1 = res[-2], res[-1]
+        x3, y3 = dedup[i+2], dedup[i+3]
+
+        dx1 = x2 - x1
+        dy1 = y2 - y1
+        dx2 = x3 - x2
+        dy2 = y3 - y2
+
+        cross = dx1 * dy2 - dy1 * dx2
+        dot = dx1 * dx2 + dy1 * dy2
+        l1_sq = dx1 * dx1 + dy1 * dy1
+        l2_sq = dx2 * dx2 + dy2 * dy2
+
+        # Collinear if cross product relative to lengths is near zero and continuing in same direction
+        if dot > 0 and (cross * cross) <= tol_sq * l1_sq * l2_sq:
+            continue
+
+        res.extend([x2, y2])
+
+    res.extend([dedup[-2], dedup[-1]])
     return res
 
 
-def delta_encode_contour(pts, scale_factor=100):
+def delta_encode_contour(pts, scale_factor=1000):
     """Converts a flat list of mm coordinates [x0, y0, x1, y1, ...] into integer delta list.
     
-    [lx, ly, dx1, dy1, dx2, dy2, ...] where 1 unit = 0.01 mm (10 microns).
+    [lx, ly, dx1, dy1, dx2, dy2, ...] where 1 unit = 0.001 mm (1 micron).
     """
     if len(pts) < 4:
         return []
@@ -324,8 +358,9 @@ def parse_layer_features(features_text, is_silkscreen=False):
     lines, arcs, circles, rects, surfaces, texts = [], [], [], [], [], []
     current_contour = []
 
-    # Decimation tolerance: fine 0.025 mm for silkscreen font glyphs, 0.035 mm for copper pours
-    simplify_tol = 0.025 if is_silkscreen else 0.035
+    # Safe tolerance: fine 2 microns for copper pour features & necks, 22 microns for silkscreen font strokes
+    min_dist = 0.022 if is_silkscreen else 0.002
+    steps_arc = 8 if is_silkscreen else 12
 
     for raw_line in features_text.splitlines():
         line = raw_line.strip()
@@ -336,12 +371,12 @@ def parse_layer_features(features_text, is_silkscreen=False):
         cmd = toks[0].upper()
 
         if cmd == "L" and len(toks) >= 6:
-            xs = round(float(toks[1]) * coord_scale, 2)
-            ys = round(float(toks[2]) * coord_scale, 2)
-            xe = round(float(toks[3]) * coord_scale, 2)
-            ye = round(float(toks[4]) * coord_scale, 2)
+            xs = round(float(toks[1]) * coord_scale, 3)
+            ys = round(float(toks[2]) * coord_scale, 3)
+            xe = round(float(toks[3]) * coord_scale, 3)
+            ye = round(float(toks[4]) * coord_scale, 3)
             sym = symbols.get(toks[5], {"type": "circle", "d": 0.2})
-            width = round(sym.get("d", sym.get("w", 0.2)), 2)
+            width = round(sym.get("d", sym.get("w", 0.2)), 3)
             lines.append((xs, ys, xe, ye, width))
 
         elif cmd == "A" and len(toks) >= 8:
@@ -352,24 +387,24 @@ def parse_layer_features(features_text, is_silkscreen=False):
             xc = float(toks[5]) * coord_scale
             yc = float(toks[6]) * coord_scale
             sym = symbols.get(toks[7], {"type": "circle", "d": 0.2})
-            width = round(sym.get("d", sym.get("w", 0.2)), 2)
+            width = round(sym.get("d", sym.get("w", 0.2)), 3)
             cw = 1 if (len(toks) > 10 and toks[10].upper() in ("Y", "CW", "TRUE")) else 0
 
             r = round((math.hypot(xs - xc, ys - yc) + math.hypot(xe - xc, ye - yc)) / 2.0, 3)
             a_start = round(math.atan2(ys - yc, xs - xc), 4)
             a_end = round(math.atan2(ye - yc, xe - xc), 4)
-            arcs.append((round(xc, 2), round(yc, 2), r, a_start, a_end, cw, width))
+            arcs.append((round(xc, 3), round(yc, 3), r, a_start, a_end, cw, width))
 
         elif cmd == "P" and len(toks) >= 4:
-            x = round(float(toks[1]) * coord_scale, 2)
-            y = round(float(toks[2]) * coord_scale, 2)
+            x = round(float(toks[1]) * coord_scale, 3)
+            y = round(float(toks[2]) * coord_scale, 3)
             sym = symbols.get(toks[3], {"type": "circle", "d": 0.5})
             angle = float(toks[6]) if len(toks) > 6 and toks[6].replace(".", "", 1).lstrip("-").isdigit() else 0.0
 
             if sym["type"] == "circle":
-                circles.extend([x, y, round(sym["d"] / 2.0, 2)])
+                circles.extend([x, y, round(sym["d"] / 2.0, 3)])
             else:
-                rects.extend([x, y, round(sym["w"], 2), round(sym["h"], 2), round(angle, 1)])
+                rects.extend([x, y, round(sym["w"], 3), round(sym["h"], 3), round(angle, 1)])
 
         elif cmd == "T" and is_silkscreen:
             # Extract physical silkscreen text, normalizing height to mm and resolving rotation
@@ -379,8 +414,8 @@ def parse_layer_features(features_text, is_silkscreen=False):
                     text_str = m_txt.group(1)
                     before = line[:m_txt.start()].split()
                     if len(before) >= 3:
-                        x = round(float(before[1]) * coord_scale, 2)
-                        y = round(float(before[2]) * coord_scale, 2)
+                        x = round(float(before[1]) * coord_scale, 3)
+                        y = round(float(before[2]) * coord_scale, 3)
 
                         # Rotation angle (typically token 6 or 5)
                         rot = 0.0
@@ -429,15 +464,14 @@ def parse_layer_features(features_text, is_silkscreen=False):
             elif not cw and a_end <= a_start:
                 a_end += 2.0 * math.pi
 
-            steps_arc = 6
             for i in range(1, steps_arc + 1):
                 ang = a_start + (i / float(steps_arc)) * (a_end - a_start)
                 current_contour.extend([xc + r * math.cos(ang), yc + r * math.sin(ang)])
 
         elif cmd == "OE" and current_contour:
             if len(current_contour) >= 6:
-                simplified = simplify_contour(current_contour, simplify_tol)
-                delta_encoded = delta_encode_contour(simplified, 100)
+                simplified = simplify_contour(current_contour, min_dist=min_dist)
+                delta_encoded = delta_encode_contour(simplified, 1000)
                 if delta_encoded:
                     surfaces.append(delta_encoded)
             current_contour = []
@@ -1687,12 +1721,12 @@ function onDataReady(data) {{
       const p = new Path2D();
       for (const d of layer.surfaces) {{
         if (d.length < 4) continue;
-        let x = d[0] / 100.0;
-        let y = d[1] / 100.0;
+        let x = d[0] / 1000.0;
+        let y = d[1] / 1000.0;
         p.moveTo(x, y);
         for (let i = 2; i < d.length; i += 2) {{
-          x += d[i] / 100.0;
-          y += d[i+1] / 100.0;
+          x += d[i] / 1000.0;
+          y += d[i+1] / 1000.0;
           p.lineTo(x, y);
         }}
         p.closePath();
@@ -1837,8 +1871,9 @@ function render() {{
   }}
 
   // 2. Hardware-Accelerated Vector Layers (EDA Color Palette)
-  ctx.lineCap = 'square';
-  ctx.lineJoin = 'miter';
+  // Round lineCap and round lineJoin match Gerber/ODB++ circular aperture draws, ensuring smooth trace joints and filleted connections
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
 
   for (const layer of board.layers) {{
     if (!layer.visible) continue;
@@ -1847,13 +1882,12 @@ function render() {{
 
     ctx.strokeStyle = layer.color;
     ctx.fillStyle = layer.color;
+    const isCopper = layer.type === 'SIGNAL';
+    ctx.globalAlpha = isCopper ? 0.96 : 0.95;
 
     // Copper Surfaces & Ground Pours
     if (layer.surfacePath) {{
-      const isCopper = layer.type === 'SIGNAL';
-      ctx.globalAlpha = isCopper ? 0.72 : 0.95;
       ctx.fill(layer.surfacePath, 'evenodd');
-      ctx.globalAlpha = 1.0;
     }}
 
     // Spatial Chunk Culled Traces & Arcs
@@ -1900,9 +1934,50 @@ function render() {{
       }}
     }}
   }}
+  ctx.globalAlpha = 1.0;
 
-  // 3. Component Courtyards, Pads & Test Points
-  // Component structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic]
+  // 3. Silkscreen Text Layer (Physical Printed Text from ODB++ Silkscreen)
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  for (const layer of board.layers) {{
+    if (!layer.visible || !layer.texts || layer.texts.length === 0) continue;
+    if ((layer.side === 'TOP' && mirrorX) || (layer.side === 'BOTTOM' && !mirrorX)) continue;
+    ctx.fillStyle = layer.color;
+
+    for (const t of layer.texts) {{
+      const x = t[0], y = t[1], text = t[2], h = t[3], rot = t[4], mir = t[5];
+      if (x < vMinX || x > vMaxX || y < vMinY || y > vMaxY) continue;
+      // LOD threshold: suppress silkscreen text when on-screen font height < 4.0 pixels
+      if (h * scale < 4.0) continue;
+
+      const [sx, sy] = toScreen(x, y);
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      let ang = -rot * (Math.PI / 180);
+      if (mirrorX) ang = Math.PI - ang;
+      ctx.rotate(ang);
+      if (mir) ctx.scale(-1, 1);
+
+      const FONT_RES = 64;
+      ctx.scale(scale / FONT_RES, scale / FONT_RES);
+      ctx.font = `600 ${{Math.round(h * FONT_RES)}}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(text, 0, 0);
+      ctx.restore();
+    }}
+  }}
+  ctx.restore();
+
+  // 4. Board Boundary Edge Outline
+  if (board.profile && board.profile.visible && board.profile.path) {{
+    ctx.strokeStyle = board.profile.color;
+    ctx.lineWidth = Math.max(0.25, 1.5 / scale);
+    ctx.stroke(board.profile.path);
+  }}
+
+  // 5. Component Courtyards, Pads & In-Courtyard RefDes Labels
+  // Component structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic, pxc, pyc]
   if (board.components && board.components.length > 0) {{
     for (const cmp of board.components) {{
       const cSide = cmp[7] === 0 ? 'TOP' : 'BOTTOM';
@@ -1925,7 +2000,6 @@ function render() {{
 
       if (isTP) {{
         // TEST POINTS (TP...): Strictly circles filled with light cyan (#e0f7fa), electric cyan border (#00e5ff)
-        // No plus signs or crosshairs.
         if (compConfig.showTestpoints) {{
           const r = Math.max(cw, ch, 0.8) / 2.0;
 
@@ -1940,9 +2014,9 @@ function render() {{
           ctx.lineWidth = Math.max(isTarget ? 0.22 : 0.12, 1.2 / scale);
           ctx.stroke();
 
-          // Centered Test Point RefDes inside circle (LOD threshold: diameter >= 16 screen px)
+          // Centered Test Point RefDes inside circle (LOD threshold: diameter >= 14 screen px)
           const screenD = r * 2 * scale;
-          if (screenD >= 16 || isTarget) {{
+          if (screenD >= 14 || isTarget) {{
             ctx.save();
             ctx.translate(pxc, pyc);
             ctx.scale(mirrorX ? -1 : 1, -1);
@@ -1952,7 +2026,14 @@ function render() {{
             ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = isTarget ? '#ffffff' : '#00363a';
+            if (isTarget) {{
+              ctx.lineWidth = FONT_RES * 0.14;
+              ctx.strokeStyle = '#060a0f';
+              ctx.strokeText(ref, 0, 0);
+              ctx.fillStyle = '#ffffff';
+            }} else {{
+              ctx.fillStyle = '#00363a';
+            }}
             ctx.fillText(ref, 0, 0);
             ctx.restore();
           }}
@@ -2010,48 +2091,70 @@ function render() {{
           }}
         }}
 
-        // Bold Orange RefDes (#ff9900) centered inside large IC bodies (>= 3.5mm, U..., TR...)
+        // Universal RefDes Text centered inside Component Courtyard (drawn OVER pads & copper with high contrast)
+        // Rendered for ALL components (ICs, passives, connectors, transistors)
         // Rotates along component primary axis and flips automatically to remain right-side up.
-        // Generic centered RefDes suppressed on small passives to prevent overlapping silkscreen.
-        if (isLargeIC || isTarget) {{
-          const maxDim = cw >= ch ? cw : ch;
-          const minDim = cw >= ch ? ch : cw;
+        const maxDim = cw >= ch ? cw : ch;
+        const minDim = cw >= ch ? ch : cw;
 
-          // Physical font height in millimeters (strictly bounded, never giant!)
-          let fontMm = Math.min(minDim * 0.40, 2.0);
-          if (fontMm * 0.6 * ref.length > maxDim * 0.85) {{
-            fontMm = (maxDim * 0.85) / (ref.length * 0.6);
-          }}
-          fontMm = Math.max(fontMm, 0.6);
+        // Physical font height in millimeters (bounded to fit inside package dimensions)
+        let fontMm = isLargeIC ? Math.min(minDim * 0.42, 2.0) : Math.min(minDim * 0.65, 1.4);
+        const charW = fontMm * 0.58;
+        if (charW * ref.length > maxDim * 0.88) {{
+          fontMm = (maxDim * 0.88) / (ref.length * 0.58);
+        }}
+        fontMm = Math.max(fontMm, 0.22);
 
-          // On-screen font height in actual screen pixels
-          const onScreenFontPx = fontMm * scale;
+        // On-screen font height in actual screen pixels
+        const onScreenFontPx = fontMm * scale;
 
-          // LOD Threshold: Suppress IC labels when zoomed out to prevent giant overlapping clutter!
-          // Only render when on-screen font is clearly legible (>= 7.5 px) or when active search target
-          if (onScreenFontPx >= 7.5 || isTarget) {{
-            ctx.save();
-            ctx.translate(pxc, pyc);
+        // LOD Threshold: render when text is legible on screen (>= 6.0 px) or when search/selection target
+        if (onScreenFontPx >= 6.0 || isTarget) {{
+          ctx.save();
+          ctx.translate(pxc, pyc);
 
-            const isWide = cw >= ch;
-            let textAngle = isWide ? 0 : Math.PI / 2;
-            let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
-            totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-            const flip = (totalWorldAngle > Math.PI / 2 && totalWorldAngle < 3 * Math.PI / 2);
+          const isWide = cw >= ch;
+          let textAngle = isWide ? 0 : Math.PI / 2;
+          let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
+          totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+          const flip = (totalWorldAngle > Math.PI / 2 + 0.01 && totalWorldAngle < 3 * Math.PI / 2 - 0.01);
 
-            ctx.rotate(textAngle);
-            if (flip) ctx.rotate(Math.PI);
-            ctx.scale(mirrorX ? -1 : 1, -1);
+          ctx.rotate(textAngle);
+          if (flip) ctx.rotate(Math.PI);
+          ctx.scale(mirrorX ? -1 : 1, -1);
 
-            const FONT_RES = 64;
-            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = isTarget ? '#ff2222' : '#ff9900';
-            ctx.fillText(ref, 0, 0);
-            ctx.restore();
-          }}
+          // 1. Dark high-contrast backing pill OVER pads and copper
+          const textW = ref.length * 0.58 * fontMm;
+          const textH = fontMm * 1.1;
+          const padMarginX = Math.min(0.25, fontMm * 0.22);
+          const padMarginY = Math.min(0.12, fontMm * 0.15);
+          const pillW = textW + padMarginX * 2;
+          const pillH = textH + padMarginY * 2;
+
+          ctx.fillStyle = 'rgba(6, 10, 15, 0.88)';
+          ctx.fillRect(-pillW / 2, -pillH / 2, pillW, pillH);
+          ctx.strokeStyle = isTarget ? '#ff2222' : (isLargeIC ? 'rgba(255, 153, 0, 0.45)' : 'rgba(0, 229, 255, 0.35)');
+          ctx.lineWidth = Math.max(0.04, 0.7 / scale);
+          ctx.strokeRect(-pillW / 2, -pillH / 2, pillW, pillH);
+
+          // 2. High-resolution Crisp Vector Text Rendering
+          const FONT_RES = 64;
+          ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+          ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+
+          // Dark stroke for razor-sharp edge contrast over pads & copper
+          ctx.lineJoin = 'round';
+          ctx.lineWidth = Math.max(FONT_RES * 0.14, (2.0 * FONT_RES) / (fontMm * scale));
+          ctx.strokeStyle = '#060a0f';
+          ctx.strokeText(ref, 0, 0);
+
+          // Vibrant foreground fill
+          ctx.fillStyle = isTarget ? '#ffffff' : (isLargeIC ? '#ffb347' : '#ffffff');
+          ctx.fillText(ref, 0, 0);
+
+          ctx.restore();
         }}
       }}
 
@@ -2072,7 +2175,7 @@ function render() {{
     }}
   }}
 
-  // 3b. Selected Trace / Net Pin & Flight-Line Highlights
+  // 6. Selected Trace / Net Pin & Flight-Line Highlights
   if (selectedNet && selectedNet[1] && selectedNet[1].length > 0) {{
     const curSideCode = mirrorX ? 1 : 0;
     const netPins = selectedNet[1];
@@ -2129,43 +2232,7 @@ function render() {{
     }}
   }}
 
-  // 4. Board Boundary Edge Outline
-  if (board.profile && board.profile.visible && board.profile.path) {{
-    ctx.strokeStyle = board.profile.color;
-    ctx.lineWidth = Math.max(0.25, 1.5 / scale);
-    ctx.stroke(board.profile.path);
-  }}
-
-  // 5. Silkscreen Text Layer (Physical Top/Bottom Overlay in Amber Gold #d9a738)
   ctx.restore();
-  for (const layer of board.layers) {{
-    if (!layer.visible || !layer.texts || layer.texts.length === 0) continue;
-    if ((layer.side === 'TOP' && mirrorX) || (layer.side === 'BOTTOM' && !mirrorX)) continue;
-    ctx.fillStyle = layer.color;
-
-    for (const t of layer.texts) {{
-      const x = t[0], y = t[1], text = t[2], h = t[3], rot = t[4], mir = t[5];
-      if (x < vMinX || x > vMaxX || y < vMinY || y > vMaxY) continue;
-      // LOD threshold: suppress silkscreen text when on-screen font height < 4.0 pixels
-      if (h * scale < 4.0) continue;
-
-      const [sx, sy] = toScreen(x, y);
-      ctx.save();
-      ctx.translate(sx, sy);
-
-      let ang = -rot * (Math.PI / 180);
-      if (mirrorX) ang = Math.PI - ang;
-      ctx.rotate(ang);
-      if (mir) ctx.scale(-1, 1);
-
-      const FONT_RES = 64;
-      ctx.scale(scale / FONT_RES, scale / FONT_RES);
-      ctx.font = `600 ${{Math.round(h * FONT_RES)}}px -apple-system, BlinkMacSystemFont, sans-serif`;
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(text, 0, 0);
-      ctx.restore();
-    }}
-  }}
 
   // 6. Shift + Measure Tool Caliper Overlay
   if (measureP1 && measureP2) {{
