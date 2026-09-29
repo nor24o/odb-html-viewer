@@ -1817,10 +1817,135 @@ function onDataReady(data) {{
   document.getElementById('badge-tps').textContent = tpCount;
   document.getElementById('badge-traces').textContent = board.nets ? board.nets.length : 0;
 
+  buildComponentPaths();
+  buildSpatialGrid();
   buildLayerList();
   initTabsAndLists();
   resize();
   fitBoard();
+}}
+
+const COMP_GRID_CELL = 12.0;
+const compSpatialGrid = new Map();
+
+function buildSpatialGrid() {{
+  compSpatialGrid.clear();
+  if (!board || !board.components) return;
+  for (const c of board.components) {{
+    const side = c[7];
+    const cx = c[1], cy = c[2], cw = c[3], ch = c[4];
+    const pxc = c[12] || 0, pyc = c[13] || 0;
+    const maxDim = Math.max(cw, ch, 1.0);
+    const wx = cx + pxc, wy = cy + pyc;
+    const gMinX = Math.floor((wx - maxDim) / COMP_GRID_CELL);
+    const gMaxX = Math.floor((wx + maxDim) / COMP_GRID_CELL);
+    const gMinY = Math.floor((wy - maxDim) / COMP_GRID_CELL);
+    const gMaxY = Math.floor((wy + maxDim) / COMP_GRID_CELL);
+    for (let gx = gMinX; gx <= gMaxX; gx++) {{
+      for (let gy = gMinY; gy <= gMaxY; gy++) {{
+        const k = side + '_' + gx + '_' + gy;
+        let list = compSpatialGrid.get(k);
+        if (!list) {{
+          list = [];
+          compSpatialGrid.set(k, list);
+        }}
+        list.push(c);
+      }}
+    }}
+  }}
+}}
+
+function buildComponentPaths() {{
+  if (!board || !board.components) return;
+  board.topPkgPath = new Path2D();
+  board.botPkgPath = new Path2D();
+  board.topPin1Path = new Path2D();
+  board.botPin1Path = new Path2D();
+  board.topPinOtherPath = new Path2D();
+  board.botPinOtherPath = new Path2D();
+  board.topTpPath = new Path2D();
+  board.botTpPath = new Path2D();
+
+  for (const c of board.components) {{
+    const isTP = c[10] === 1;
+    const side = c[7]; // 0=TOP, 1=BOT
+    const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+    const pxc = c[12] || 0, pyc = c[13] || 0;
+    const rad = crot * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    if (isTP) {{
+      const p = side === 0 ? board.topTpPath : board.botTpPath;
+      const r = Math.max(cw, ch, 0.8) / 2.0;
+      const wx = cx + pxc;
+      const wy = cy + pyc;
+      p.moveTo(wx + r, wy);
+      p.arc(wx, wy, r, 0, Math.PI * 2);
+    }} else {{
+      const p = side === 0 ? board.topPkgPath : board.botPkgPath;
+      const hw = cw / 2, hh = ch / 2;
+      const pts = [
+        [pxc - hw, pyc - hh],
+        [pxc + hw, pyc - hh],
+        [pxc + hw, pyc + hh],
+        [pxc - hw, pyc + hh]
+      ];
+      const wpts = pts.map(([lx, ly]) => [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos]);
+      p.moveTo(wpts[0][0], wpts[0][1]);
+      p.lineTo(wpts[1][0], wpts[1][1]);
+      p.lineTo(wpts[2][0], wpts[2][1]);
+      p.lineTo(wpts[3][0], wpts[3][1]);
+      p.closePath();
+
+      // SMT Pads & Synthesized Passive Pads
+      const p1 = side === 0 ? board.topPin1Path : board.botPin1Path;
+      const pO = side === 0 ? board.topPinOtherPath : board.botPinOtherPath;
+      const pins = c[9];
+      if (pins && pins.length > 0) {{
+        for (let i = 0; i < pins.length; i++) {{
+          const pin = pins[i];
+          const isPin1 = (i === 0 || pin[0] === '1' || pin[0] === 'A');
+          const target = isPin1 ? p1 : pO;
+          const px = pin[1], py = pin[2], pw = pin[3], ph = pin[4];
+          const phw = pw / 2, phh = ph / 2;
+          const cpts = [
+            [px - phw, py - phh],
+            [px + phw, py - phh],
+            [px + phw, py + phh],
+            [px - phw, py + phh]
+          ].map(([lx, ly]) => [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos]);
+          target.moveTo(cpts[0][0], cpts[0][1]);
+          target.lineTo(cpts[1][0], cpts[1][1]);
+          target.lineTo(cpts[2][0], cpts[2][1]);
+          target.lineTo(cpts[3][0], cpts[3][1]);
+          target.closePath();
+        }}
+      }} else {{
+        const pw = cw >= ch ? Math.min(cw * 0.28, 1.2) : cw * 0.8;
+        const ph = cw >= ch ? ch * 0.8 : Math.min(ch * 0.28, 1.2);
+        const pad1 = cw >= ch ? [pxc - cw / 2 + pw / 2 + 0.05, pyc, pw, ph] : [pxc, pyc + ch / 2 - ph / 2 - 0.05, pw, ph];
+        const pad2 = cw >= ch ? [pxc + cw / 2 - pw / 2 - 0.05, pyc, pw, ph] : [pxc, pyc - ch / 2 + ph / 2 + 0.05, pw, ph];
+
+        for (let k = 0; k < 2; k++) {{
+          const b = k === 0 ? pad1 : pad2;
+          const target = k === 0 ? p1 : pO;
+          const phw = b[2] / 2, phh = b[3] / 2;
+          const cpts = [
+            [b[0] - phw, b[1] - phh],
+            [b[0] + phw, b[1] - phh],
+            [b[0] + phw, b[1] + phh],
+            [b[0] - phw, b[1] + phh]
+          ].map(([lx, ly]) => [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos]);
+          target.moveTo(cpts[0][0], cpts[0][1]);
+          target.lineTo(cpts[1][0], cpts[1][1]);
+          target.lineTo(cpts[2][0], cpts[2][1]);
+          target.lineTo(cpts[3][0], cpts[3][1]);
+          target.closePath();
+        }}
+      }}
+    }}
+  }}
 }}
 
 function resize() {{
@@ -1907,8 +2032,8 @@ function render() {{
   }}
 
   // 2. Hardware-Accelerated Vector Layers (EDA Color Palette)
-  // High-performance lineCap and smooth lineJoin for fast vector rendering
-  ctx.lineCap = 'butt';
+  // Round lineCap and round lineJoin match Gerber/ODB++ circular aperture draws, ensuring continuous, unbroken traces
+  ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
   for (const layer of board.layers) {{
@@ -2012,110 +2137,86 @@ function render() {{
     ctx.stroke(board.profile.path);
   }}
 
-  // 5. Component Courtyards & Pads (Physical Layer in World Space)
-  if (board.components && board.components.length > 0) {{
-    const curSideCode = mirrorX ? 1 : 0;
-    for (const cmp of board.components) {{
-      if (cmp[7] !== curSideCode) continue;
+  // 5. Precompiled Component Courtyards & Pads (Zero-Overhead GPU Batching)
+  if (compConfig.showPackages) {{
+    const pkgPath = mirrorX ? board.botPkgPath : board.topPkgPath;
+    if (pkgPath) {{
+      ctx.strokeStyle = compConfig.colorPkg;
+      ctx.lineWidth = Math.max(0.12, 1.2 / scale);
+      ctx.stroke(pkgPath);
+    }}
 
-      const cx = cmp[1], cy = cmp[2], cw = cmp[3], ch = cmp[4], crot = cmp[5];
-      const pxc = cmp[12] || 0;
-      const pyc = cmp[13] || 0;
-      const isTP = cmp[10] === 1;
-      const isTarget = searchTarget && cmp[0].toLowerCase() === searchTarget.toLowerCase();
-
-      // World center of component package
-      const rad = crot * (Math.PI / 180);
-      const cosR = Math.cos(rad);
-      const sinR = Math.sin(rad);
-      const wx = cx + pxc * cosR - pyc * sinR;
-      const wy = cy + pxc * sinR + pyc * cosR;
-      const maxDim = Math.max(cw, ch, 1.0);
-
-      // Frustum Culling
-      if (wx + maxDim < vMinX || wx - maxDim > vMaxX || wy + maxDim < vMinY || wy - maxDim > vMaxY) continue;
-
-      ctx.save();
-      ctx.translate(cx, cy);
-
-      if (isTP) {{
-        // Test Points: Circular pad with high-visibility fill & border
-        if (compConfig.showTestpoints) {{
-          const r = Math.max(cw, ch, 0.8) / 2.0;
-          ctx.fillStyle = isTarget ? '#ff2222' : '#e0f7fa';
-          ctx.beginPath();
-          ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
-          ctx.fill();
-
-          ctx.strokeStyle = isTarget ? '#ffffff' : compConfig.colorTP;
-          ctx.lineWidth = Math.max(isTarget ? 0.22 : 0.12, 1.2 / scale);
-          ctx.stroke();
-        }}
-      }} else if (compConfig.showPackages) {{
-        // SMD Components: Courtyard outline & exact/synthesized pads
-        ctx.rotate(rad);
-
-        ctx.strokeStyle = isTarget ? '#ff2222' : compConfig.colorPkg;
-        ctx.lineWidth = Math.max(isTarget ? 0.25 : 0.12, 1.2 / scale);
-        ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
-
-        // Only draw individual pads if package is at least 2.5 screen pixels
-        if (maxDim * scale >= 2.5) {{
-          const pins = cmp[9];
-          if (pins && pins.length > 0) {{
-            for (let pIdx = 0; pIdx < pins.length; pIdx++) {{
-              const pin = pins[pIdx];
-              const pName = String(pin[0]).toLowerCase();
-              const isPin1 = (pName === '1' || pName === 'a' || pName === '+' || pIdx === 0);
-              const px = pin[1], py = pin[2], pw = pin[3], ph = pin[4];
-
-              ctx.fillStyle = isPin1 ? 'rgba(255, 34, 34, 0.85)' : 'rgba(0, 229, 255, 0.45)';
-              ctx.strokeStyle = isPin1 ? '#ff2222' : '#00e5ff';
-              ctx.lineWidth = Math.max(0.08, 0.8 / scale);
-              ctx.fillRect(px - pw / 2, py - ph / 2, pw, ph);
-              ctx.strokeRect(px - pw / 2, py - ph / 2, pw, ph);
-            }}
-          }} else {{
-            const pw = cw >= ch ? Math.min(cw * 0.28, 1.2) : cw * 0.8;
-            const ph = cw >= ch ? ch * 0.8 : Math.min(ch * 0.28, 1.2);
-            ctx.lineWidth = Math.max(0.08, 0.8 / scale);
-
-            if (cw >= ch) {{
-              ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
-              ctx.strokeStyle = '#ff2222';
-              ctx.fillRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
-              ctx.strokeRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
-
-              ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
-              ctx.strokeStyle = '#00e5ff';
-              ctx.fillRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
-              ctx.strokeRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
-            }} else {{
-              ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
-              ctx.strokeStyle = '#ff2222';
-              ctx.fillRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
-              ctx.strokeRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
-
-              ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
-              ctx.strokeStyle = '#00e5ff';
-              ctx.fillRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
-              ctx.strokeRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
-            }}
-          }}
-        }}
-      }}
-
-      // Target Highlight Ring in World Space
-      if (isTarget) {{
+    // Pads rendered when zoomed in enough (scale >= 2.0)
+    if (scale >= 2.0) {{
+      const p1 = mirrorX ? board.botPin1Path : board.topPin1Path;
+      const pO = mirrorX ? board.botPinOtherPath : board.topPinOtherPath;
+      if (p1) {{
+        ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
         ctx.strokeStyle = '#ff2222';
-        ctx.lineWidth = Math.max(0.3, 2.5 / scale);
-        ctx.beginPath();
-        const markR = Math.max(cw, ch) * 0.85;
-        ctx.arc(pxc, pyc, markR, 0, Math.PI * 2);
-        ctx.stroke();
+        ctx.lineWidth = Math.max(0.08, 0.8 / scale);
+        ctx.fill(p1);
+        ctx.stroke(p1);
       }}
+      if (pO) {{
+        ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
+        ctx.strokeStyle = '#00e5ff';
+        ctx.lineWidth = Math.max(0.08, 0.8 / scale);
+        ctx.fill(pO);
+        ctx.stroke(pO);
+      }}
+    }}
+  }}
 
-      ctx.restore();
+  if (compConfig.showTestpoints) {{
+    const tpPath = mirrorX ? board.botTpPath : board.topTpPath;
+    if (tpPath) {{
+      ctx.fillStyle = '#e0f7fa';
+      ctx.strokeStyle = compConfig.colorTP;
+      ctx.lineWidth = Math.max(0.12, 1.2 / scale);
+      ctx.fill(tpPath);
+      ctx.stroke(tpPath);
+    }}
+  }}
+
+  // Single Target Selection Highlight
+  if (selectedComp || selectedTP || searchTarget) {{
+    const targetRef = searchTarget || (selectedComp ? selectedComp[0] : (selectedTP ? selectedTP[0] : null));
+    if (targetRef) {{
+      const c = compMap.get(targetRef.toLowerCase());
+      if (c) {{
+        const cSide = c[7];
+        const curSideCode = mirrorX ? 1 : 0;
+        if (cSide === curSideCode) {{
+          const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+          const pxc = c[12] || 0, pyc = c[13] || 0;
+          const isTP = c[10] === 1;
+
+          ctx.save();
+          ctx.translate(cx, cy);
+          if (isTP) {{
+            const r = Math.max(cw, ch, 0.8) / 2.0;
+            ctx.fillStyle = '#ff2222';
+            ctx.beginPath();
+            ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = Math.max(0.22, 1.5 / scale);
+            ctx.stroke();
+          }} else {{
+            ctx.rotate(crot * (Math.PI / 180));
+            ctx.strokeStyle = '#ff2222';
+            ctx.lineWidth = Math.max(0.3, 2.5 / scale);
+            ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
+          }}
+          // Target ring
+          ctx.strokeStyle = '#ff2222';
+          ctx.lineWidth = Math.max(0.3, 2.5 / scale);
+          ctx.beginPath();
+          ctx.arc(pxc, pyc, Math.max(cw, ch) * 0.85, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }}
+      }}
     }}
   }}
 
@@ -3074,57 +3175,71 @@ function hitTestCanvas(clientX, clientY) {{
   const [wx, wy] = toWorld(mx, my);
   const curSideCode = mirrorX ? 1 : 0;
 
-  // 1. Check Test Points first (circular hit test)
+  const gx = Math.floor(wx / COMP_GRID_CELL);
+  const gy = Math.floor(wy / COMP_GRID_CELL);
+
+  // Check candidate cell and adjacent cells (in case component intersects cell border)
+  const candidateLists = [];
+  for (let dx = -1; dx <= 1; dx++) {{
+    for (let dy = -1; dy <= 1; dy++) {{
+      const k = curSideCode + '_' + (gx + dx) + '_' + (gy + dy);
+      const l = compSpatialGrid.get(k);
+      if (l) candidateLists.push(l);
+    }}
+  }}
+  if (candidateLists.length === 0) return null;
+
+  // 1. Check Test Points first
   if (compConfig.showTestpoints) {{
-    for (const c of board.components) {{
-      if (c[10] !== 1) continue;
-      if (c[7] !== curSideCode) continue;
-
-      const pxc = c[12] || 0;
-      const pyc = c[13] || 0;
-      const tpx = c[1] + pxc;
-      const tpy = c[2] + pyc;
-      const r = Math.max(c[3], c[4], 0.8) / 2.0;
-      const hitR = Math.max(r + 0.35, 6.0 / scale);
-
-      if (Math.hypot(wx - tpx, wy - tpy) <= hitR) {{
-        return {{ type: 'tp', item: c }};
+    for (const list of candidateLists) {{
+      for (const c of list) {{
+        if (c[10] !== 1) continue;
+        const pxc = c[12] || 0;
+        const pyc = c[13] || 0;
+        const tpx = c[1] + pxc;
+        const tpy = c[2] + pyc;
+        const r = Math.max(c[3], c[4], 0.8) / 2.0;
+        const hitR = Math.max(r + 0.35, 6.0 / scale);
+        if (Math.hypot(wx - tpx, wy - tpy) <= hitR) {{
+          return {{ type: 'tp', item: c }};
+        }}
       }}
     }}
   }}
 
-  // 2. Check Components (rotated courtyard hit test)
+  // 2. Check Components
   if (compConfig.showPackages) {{
     let bestComp = null;
     let bestArea = Infinity;
 
-    for (const c of board.components) {{
-      if (c[10] === 1) continue;
-      if (c[7] !== curSideCode) continue;
+    for (const list of candidateLists) {{
+      for (const c of list) {{
+        if (c[10] === 1) continue;
 
-      const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
-      const pxc = c[12] || 0;
-      const pyc = c[13] || 0;
+        const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+        const pxc = c[12] || 0;
+        const pyc = c[13] || 0;
 
-      const rad = -crot * (Math.PI / 180);
-      const cosR = Math.cos(rad);
-      const sinR = Math.sin(rad);
-      const dx = wx - cx;
-      const dy = wy - cy;
-      const lx = dx * cosR - dy * sinR;
-      const ly = dx * sinR + dy * cosR;
+        const rad = -crot * (Math.PI / 180);
+        const cosR = Math.cos(rad);
+        const sinR = Math.sin(rad);
+        const dx = wx - cx;
+        const dy = wy - cy;
+        const lx = dx * cosR - dy * sinR;
+        const ly = dx * sinR + dy * cosR;
 
-      const tol = Math.max(0.2, 4.0 / scale);
-      const minX = pxc - cw / 2 - tol;
-      const maxX = pxc + cw / 2 + tol;
-      const minY = pyc - ch / 2 - tol;
-      const maxY = pyc + ch / 2 + tol;
+        const tol = Math.max(0.2, 4.0 / scale);
+        const minX = pxc - cw / 2 - tol;
+        const maxX = pxc + cw / 2 + tol;
+        const minY = pyc - ch / 2 - tol;
+        const maxY = pyc + ch / 2 + tol;
 
-      if (lx >= minX && lx <= maxX && ly >= minY && ly <= maxY) {{
-        const area = cw * ch;
-        if (area < bestArea) {{
-          bestArea = area;
-          bestComp = c;
+        if (lx >= minX && lx <= maxX && ly >= minY && ly <= maxY) {{
+          const area = cw * ch;
+          if (area < bestArea) {{
+            bestArea = area;
+            bestComp = c;
+          }}
         }}
       }}
     }}
@@ -3183,7 +3298,10 @@ canvas.addEventListener('mousemove', e => {{
     panX = mx - dragStartX;
     panY = my - dragStartY;
     scheduleRender();
-  }} else if (isMeasuring) {{
+    return;
+  }}
+
+  if (isMeasuring) {{
     measureP2 = toWorld(mx, my);
     const dx = Math.abs(measureP2[0] - measureP1[0]);
     const dy = Math.abs(measureP2[1] - measureP1[1]);
@@ -3191,7 +3309,7 @@ canvas.addEventListener('mousemove', e => {{
     measureDist.textContent = `dX: ${{dx.toFixed(3)}} mm, dY: ${{dy.toFixed(3)}} mm | Dist: ${{dist.toFixed(3)}} mm`;
     scheduleRender();
   }} else if (!e.shiftKey) {{
-    // Hover hit-test: show pointer cursor when hovering over clickable component or TP
+    // Fast O(1) hover hit-test
     const hit = hitTestCanvas(e.clientX, e.clientY);
     if (hit) {{
       canvas.style.cursor = 'pointer';
