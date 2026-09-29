@@ -500,6 +500,9 @@ def chunk_layer_geometry(l_data, chunk_size=350):
         xc, yc, r = a[0], a[1], a[2]
         all_elements.append(("A", a, xc - r, yc - r, xc + r, yc + r))
 
+    # Spatially sort elements into grid tiles (20mm) so chunks have compact bounding boxes
+    all_elements.sort(key=lambda item: (int(item[3] / 20.0), int(item[2] / 20.0)))
+
     chunks = []
     for i in range(0, len(all_elements), chunk_size):
         sub = all_elements[i : i + chunk_size]
@@ -786,7 +789,7 @@ def parse_components_with_packages(comp_content, packages, pkg_list, side="TOP")
     seen_pos = {}
     deduped_components = []
     for cmp_entry in components:
-        pos_k = (cmp_entry[1], cmp_entry[2])
+        pos_k = (cmp_entry[7], cmp_entry[1], cmp_entry[2])
         part_val = str(cmp_entry[8]).strip()
         if pos_k in seen_pos:
             idx = seen_pos[pos_k]
@@ -1904,8 +1907,8 @@ function render() {{
   }}
 
   // 2. Hardware-Accelerated Vector Layers (EDA Color Palette)
-  // Round lineCap and round lineJoin match Gerber/ODB++ circular aperture draws, ensuring smooth trace joints and filleted connections
-  ctx.lineCap = 'round';
+  // High-performance lineCap and smooth lineJoin for fast vector rendering
+  ctx.lineCap = 'butt';
   ctx.lineJoin = 'round';
 
   for (const layer of board.layers) {{
@@ -2009,189 +2012,107 @@ function render() {{
     ctx.stroke(board.profile.path);
   }}
 
-  // 5. Component Courtyards, Pads & In-Courtyard RefDes Labels
-  // Component structure: [ref, x, y, w, h, rot, mir, side_code, part, pins, is_tp, is_large_ic, pxc, pyc]
+  // 5. Component Courtyards & Pads (Physical Layer in World Space)
   if (board.components && board.components.length > 0) {{
+    const curSideCode = mirrorX ? 1 : 0;
     for (const cmp of board.components) {{
-      const cSide = cmp[7] === 0 ? 'TOP' : 'BOTTOM';
-      // Side Culling
-      if ((cSide === 'TOP' && mirrorX) || (cSide === 'BOTTOM' && !mirrorX)) continue;
+      if (cmp[7] !== curSideCode) continue;
 
       const cx = cmp[1], cy = cmp[2], cw = cmp[3], ch = cmp[4], crot = cmp[5];
-      // Frustum Culling
-      if (cx + cw < vMinX || cx - cw > vMaxX || cy + ch < vMinY || cy - ch > vMaxY) continue;
-
-      const ref = cmp[0];
-      const isTP = cmp[10] === 1;
-      const isLargeIC = cmp[11] === 1;
       const pxc = cmp[12] || 0;
       const pyc = cmp[13] || 0;
-      const isTarget = searchTarget && ref.toLowerCase() === searchTarget.toLowerCase();
+      const isTP = cmp[10] === 1;
+      const isTarget = searchTarget && cmp[0].toLowerCase() === searchTarget.toLowerCase();
+
+      // World center of component package
+      const rad = crot * (Math.PI / 180);
+      const cosR = Math.cos(rad);
+      const sinR = Math.sin(rad);
+      const wx = cx + pxc * cosR - pyc * sinR;
+      const wy = cy + pxc * sinR + pyc * cosR;
+      const maxDim = Math.max(cw, ch, 1.0);
+
+      // Frustum Culling
+      if (wx + maxDim < vMinX || wx - maxDim > vMaxX || wy + maxDim < vMinY || wy - maxDim > vMaxY) continue;
 
       ctx.save();
       ctx.translate(cx, cy);
 
       if (isTP) {{
-        // TEST POINTS (TP...): Strictly circles filled with light cyan (#e0f7fa), electric cyan border (#00e5ff)
+        // Test Points: Circular pad with high-visibility fill & border
         if (compConfig.showTestpoints) {{
           const r = Math.max(cw, ch, 0.8) / 2.0;
-
-          // Fill inside circle
           ctx.fillStyle = isTarget ? '#ff2222' : '#e0f7fa';
           ctx.beginPath();
           ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
           ctx.fill();
 
-          // Border outline
           ctx.strokeStyle = isTarget ? '#ffffff' : compConfig.colorTP;
           ctx.lineWidth = Math.max(isTarget ? 0.22 : 0.12, 1.2 / scale);
           ctx.stroke();
-
-          // Centered Test Point RefDes inside circle (LOD threshold: diameter >= 14 screen px)
-          const screenD = r * 2 * scale;
-          if (screenD >= 14 || isTarget) {{
-            ctx.save();
-            ctx.translate(pxc, pyc);
-            ctx.scale(mirrorX ? -1 : 1, -1);
-            const fontMm = Math.min((r * 2 * 0.82) / (ref.length * 0.6), r * 0.75, 1.2);
-            const FONT_RES = 64;
-            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px monospace`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            if (isTarget) {{
-              ctx.lineWidth = FONT_RES * 0.14;
-              ctx.strokeStyle = '#060a0f';
-              ctx.strokeText(ref, 0, 0);
-              ctx.fillStyle = '#ffffff';
-            }} else {{
-              ctx.fillStyle = '#00363a';
-            }}
-            ctx.fillText(ref, 0, 0);
-            ctx.restore();
-          }}
         }}
       }} else if (compConfig.showPackages) {{
-        // SMD COMPONENT COURTYARD & PINS
-        ctx.rotate(crot * (Math.PI / 180));
+        // SMD Components: Courtyard outline & exact/synthesized pads
+        ctx.rotate(rad);
 
-        // Rectangular Courtyard Outline in Electric Cyan (#00e5ff)
         ctx.strokeStyle = isTarget ? '#ff2222' : compConfig.colorPkg;
         ctx.lineWidth = Math.max(isTarget ? 0.25 : 0.12, 1.2 / scale);
         ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
 
-        const pins = cmp[9];
-        if (pins && pins.length > 0) {{
-          // Exact SMT Pads: Pin 1 distinctly in Bright Red (#ff2222); Pin 2+ in Cyan (#00e5ff)
-          for (let pIdx = 0; pIdx < pins.length; pIdx++) {{
-            const pin = pins[pIdx];
-            const pName = String(pin[0]).toLowerCase();
-            const isPin1 = (pName === '1' || pName === 'a' || pName === '+' || pIdx === 0);
-            const px = pin[1], py = pin[2], pw = pin[3], ph = pin[4];
+        // Only draw individual pads if package is at least 2.5 screen pixels
+        if (maxDim * scale >= 2.5) {{
+          const pins = cmp[9];
+          if (pins && pins.length > 0) {{
+            for (let pIdx = 0; pIdx < pins.length; pIdx++) {{
+              const pin = pins[pIdx];
+              const pName = String(pin[0]).toLowerCase();
+              const isPin1 = (pName === '1' || pName === 'a' || pName === '+' || pIdx === 0);
+              const px = pin[1], py = pin[2], pw = pin[3], ph = pin[4];
 
-            ctx.fillStyle = isPin1 ? 'rgba(255, 34, 34, 0.85)' : 'rgba(0, 229, 255, 0.45)';
-            ctx.strokeStyle = isPin1 ? '#ff2222' : '#00e5ff';
-            ctx.lineWidth = Math.max(0.08, 0.8 / scale);
-            ctx.fillRect(px - pw / 2, py - ph / 2, pw, ph);
-            ctx.strokeRect(px - pw / 2, py - ph / 2, pw, ph);
-          }}
-        }} else {{
-          // Synthesized pads for 2-pin passives: Pin 1 in Red (#ff2222), Pin 2 in Cyan (#00e5ff)
-          const pw = cw >= ch ? Math.min(cw * 0.28, 1.2) : cw * 0.8;
-          const ph = cw >= ch ? ch * 0.8 : Math.min(ch * 0.28, 1.2);
-          ctx.lineWidth = Math.max(0.08, 0.8 / scale);
-
-          if (cw >= ch) {{
-            ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
-            ctx.strokeStyle = '#ff2222';
-            ctx.fillRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
-            ctx.strokeRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
-
-            ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
-            ctx.strokeStyle = '#00e5ff';
-            ctx.fillRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
-            ctx.strokeRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
+              ctx.fillStyle = isPin1 ? 'rgba(255, 34, 34, 0.85)' : 'rgba(0, 229, 255, 0.45)';
+              ctx.strokeStyle = isPin1 ? '#ff2222' : '#00e5ff';
+              ctx.lineWidth = Math.max(0.08, 0.8 / scale);
+              ctx.fillRect(px - pw / 2, py - ph / 2, pw, ph);
+              ctx.strokeRect(px - pw / 2, py - ph / 2, pw, ph);
+            }}
           }} else {{
-            ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
-            ctx.strokeStyle = '#ff2222';
-            ctx.fillRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
-            ctx.strokeRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
+            const pw = cw >= ch ? Math.min(cw * 0.28, 1.2) : cw * 0.8;
+            const ph = cw >= ch ? ch * 0.8 : Math.min(ch * 0.28, 1.2);
+            ctx.lineWidth = Math.max(0.08, 0.8 / scale);
 
-            ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
-            ctx.strokeStyle = '#00e5ff';
-            ctx.fillRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
-            ctx.strokeRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
-          }}
-        }}
+            if (cw >= ch) {{
+              ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
+              ctx.strokeStyle = '#ff2222';
+              ctx.fillRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
+              ctx.strokeRect(pxc - cw / 2 + 0.05, pyc - ph / 2, pw, ph);
 
-        // RefDes Text inside Component Body:
-        // Rendered for Large ICs / Semiconductor chips (or search/selection target)
-        // Strictly placed INSIDE the IC package body between pin rows.
-        // NO OPAQUE BLACK PILLS! Transparent background to never disrupt copper, pads, or routing!
-        if (isLargeIC || isTarget) {{
-          const bodyAxis = cmp[14] !== undefined ? cmp[14] : (cw >= ch ? 0 : 1);
-          const maxDim = cw >= ch ? cw : ch;
-          const minDim = cw >= ch ? ch : cw;
+              ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
+              ctx.strokeStyle = '#00e5ff';
+              ctx.fillRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
+              ctx.strokeRect(pxc + cw / 2 - pw - 0.05, pyc - ph / 2, pw, ph);
+            }} else {{
+              ctx.fillStyle = 'rgba(255, 34, 34, 0.85)';
+              ctx.strokeStyle = '#ff2222';
+              ctx.fillRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
+              ctx.strokeRect(pxc - pw / 2, pyc + ch / 2 - ph - 0.05, pw, ph);
 
-          // Physical font height in millimeters (strictly bounded to fit inside package body)
-          let fontMm = Math.min(minDim * 0.38, 2.0);
-          const charW = fontMm * 0.58;
-          if (charW * ref.length > maxDim * 0.85) {{
-            fontMm = (maxDim * 0.85) / (ref.length * 0.58);
-          }}
-          fontMm = Math.max(fontMm, 0.4);
-
-          // On-screen font height in actual screen pixels
-          const onScreenFontPx = fontMm * scale;
-
-          // LOD Threshold: render when clearly legible on screen (>= 6.5 px) or when search target
-          if (onScreenFontPx >= 6.5 || isTarget) {{
-            ctx.save();
-            ctx.translate(pxc, pyc);
-
-            // Rotate along IC body axis (bodyAxis === 1 means body runs along Y in package)
-            let textAngle = (bodyAxis === 1) ? Math.PI / 2 : 0;
-            let totalWorldAngle = crot * (Math.PI / 180) + textAngle;
-            totalWorldAngle = ((totalWorldAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-            const flip = (totalWorldAngle > Math.PI / 2 + 0.01 && totalWorldAngle < 3 * Math.PI / 2 - 0.01);
-
-            ctx.rotate(textAngle);
-            if (flip) ctx.rotate(Math.PI);
-            ctx.scale(mirrorX ? -1 : 1, -1);
-
-            // Clean, non-disruptive vector text inside chip body (NO black box!)
-            const FONT_RES = 64;
-            ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-            ctx.font = `bold ${{Math.round(fontMm * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-
-            // Subtle dark stroke for contrast over laminate and copper
-            ctx.lineJoin = 'round';
-            ctx.lineWidth = Math.max(FONT_RES * 0.12, (1.8 * FONT_RES) / (fontMm * scale));
-            ctx.strokeStyle = '#060a0f';
-            ctx.strokeText(ref, 0, 0);
-
-            // Amber gold for ICs, bright white for search target
-            ctx.fillStyle = isTarget ? '#ffffff' : '#ffb347';
-            ctx.fillText(ref, 0, 0);
-
-            ctx.restore();
+              ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
+              ctx.strokeStyle = '#00e5ff';
+              ctx.fillRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
+              ctx.strokeRect(pxc - pw / 2, pyc - ch / 2 + 0.05, pw, ph);
+            }}
           }}
         }}
       }}
 
-      // Search Highlight Indicator Ring
+      // Target Highlight Ring in World Space
       if (isTarget) {{
-        ctx.save();
-        ctx.translate(pxc, pyc);
         ctx.strokeStyle = '#ff2222';
         ctx.lineWidth = Math.max(0.3, 2.5 / scale);
         ctx.beginPath();
         const markR = Math.max(cw, ch) * 0.85;
-        ctx.arc(0, 0, markR, 0, Math.PI * 2);
+        ctx.arc(pxc, pyc, markR, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.restore();
       }}
 
       ctx.restore();
@@ -2255,7 +2176,136 @@ function render() {{
     }}
   }}
 
+  // Restore hardware transform: returning to 1:1 screen pixel space
   ctx.restore();
+
+  // -------------------------------------------------------------
+  // 7. TOP OVERLAY PASS: RefDes Text Labels for ALL Components & TPs
+  // Rendered in Screen Space on top of ALL physical layers, pads & copper!
+  // Perfectly upright (never upside-down, never mirrored backwards).
+  // Dark contrast stroke ensures 100% readability over any background.
+  // NO disruptive opaque black boxes!
+  // -------------------------------------------------------------
+  if (board.components && board.components.length > 0) {{
+    const curSideCode = mirrorX ? 1 : 0;
+    ctx.save();
+    ctx.lineJoin = 'round';
+
+    for (const cmp of board.components) {{
+      if (cmp[7] !== curSideCode) continue;
+
+      const ref = cmp[0];
+      const cx = cmp[1], cy = cmp[2], cw = cmp[3], ch = cmp[4], crot = cmp[5];
+      const isTP = cmp[10] === 1;
+      const isLargeIC = cmp[11] === 1;
+      const pxc = cmp[12] || 0;
+      const pyc = cmp[13] || 0;
+      const bodyAxis = cmp[14] !== undefined ? cmp[14] : (cw >= ch ? 0 : 1);
+      const isTarget = searchTarget && ref.toLowerCase() === searchTarget.toLowerCase();
+
+      if (isTP && !compConfig.showTestpoints && !isTarget) continue;
+      if (!isTP && !compConfig.showPackages && !isTarget) continue;
+
+      // World center of component package
+      const rad = crot * (Math.PI / 180);
+      const cosR = Math.cos(rad);
+      const sinR = Math.sin(rad);
+      const wx = cx + pxc * cosR - pyc * sinR;
+      const wy = cy + pxc * sinR + pyc * cosR;
+
+      // Screen center
+      const [sx, sy] = toScreen(wx, wy);
+
+      // Frustum culling on screen
+      if (sx < -100 || sx > canvas.width + 100 || sy < -100 || sy > canvas.height + 100) continue;
+
+      // Determine dimensions along text axis and perpendicular axis
+      let bodyLen, bodyThick, lx, ly;
+      if (isTP) {{
+        const r = Math.max(cw, ch, 0.8) / 2.0;
+        bodyLen = r * 2.0;
+        bodyThick = r * 2.0;
+        lx = 1; ly = 0;
+      }} else if (bodyAxis === 1) {{
+        bodyLen = Math.max(ch, 0.5);
+        bodyThick = Math.max(cw, 0.5);
+        lx = 0; ly = 1;
+      }} else {{
+        bodyLen = Math.max(cw, 0.5);
+        bodyThick = Math.max(ch, 0.5);
+        lx = 1; ly = 0;
+      }}
+
+      // Font size calculation (mm & screen pixels)
+      let fontMm;
+      if (isTP) {{
+        fontMm = Math.min((bodyLen * 0.82) / (ref.length * 0.55), bodyThick * 0.85, 1.2);
+      }} else if (isLargeIC) {{
+        fontMm = Math.min(bodyThick * 0.45, 2.2);
+        if (fontMm * 0.58 * ref.length > bodyLen * 0.85) {{
+          fontMm = (bodyLen * 0.85) / (ref.length * 0.58);
+        }}
+        fontMm = Math.max(fontMm, 0.4);
+      }} else {{
+        // Passives & Small SMD Components (R5206, C5202, etc.)
+        fontMm = Math.min(bodyThick * 0.70, (bodyLen * 0.88) / (ref.length * 0.55), 1.2);
+        fontMm = Math.max(fontMm, 0.25);
+      }}
+
+      let fontPx = fontMm * scale;
+      if (isTarget) {{
+        fontPx = Math.max(fontPx, 11.0);
+      }} else if (fontPx < 6.5) {{
+        // LOD threshold: cull tiny illegible text to maintain 60 FPS
+        continue;
+      }}
+
+      // Calculate Screen Angle of Text
+      const wDirX = lx * cosR - ly * sinR;
+      const wDirY = lx * sinR + ly * cosR;
+      const sDirX = wDirX * (mirrorX ? -1 : 1);
+      const sDirY = -wDirY;
+
+      let textAngle = Math.atan2(sDirY, sDirX);
+      // Guarantee text is never upside-down or reading right-to-left
+      if (textAngle > Math.PI / 2) {{
+        textAngle -= Math.PI;
+      }} else if (textAngle < -Math.PI / 2) {{
+        textAngle += Math.PI;
+      }}
+
+      ctx.save();
+      ctx.translate(sx, sy);
+      if (Math.abs(textAngle) > 0.001) {{
+        ctx.rotate(textAngle);
+      }}
+
+      const fontSize = Math.round(fontPx);
+      ctx.font = `bold ${{fontSize}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Contrast outline: dark stroke ensures 100% readability over copper, pads, or laminate
+      ctx.lineWidth = Math.max(1.8, fontSize * 0.16);
+      ctx.strokeStyle = '#05080c';
+      ctx.strokeText(ref, 0, 0);
+
+      // Distinct, clean fill colors
+      if (isTarget) {{
+        ctx.fillStyle = '#ff3333';
+      }} else if (isTP) {{
+        ctx.fillStyle = '#00e5ff';
+      }} else if (isLargeIC) {{
+        ctx.fillStyle = '#ffb347';
+      }} else {{
+        ctx.fillStyle = '#f0f4f8';
+      }}
+      ctx.fillText(ref, 0, 0);
+
+      ctx.restore();
+    }}
+    ctx.restore();
+  }}
 
   // 6. Shift + Measure Tool Caliper Overlay
   if (measureP1 && measureP2) {{
@@ -2498,6 +2548,9 @@ function renderCompList() {{
         ${{pinCount > 0 ? `<span class="item-badge badge-pins">${{pinCount}}P</span>` : ''}}
       </div>
     `;
+    if (isSel) {{
+      setTimeout(() => row.scrollIntoView({{ block: 'nearest' }}), 0);
+    }}
     row.addEventListener('click', () => selectComponent(c));
     container.appendChild(row);
   }}
@@ -2514,24 +2567,30 @@ function renderCompList() {{
   }}
 }}
 
-function selectComponent(c) {{
+function selectComponent(c, autoPan = true) {{
   selectedComp = c;
   selectedTP = null;
   searchTarget = c[0];
   const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
-  setViewSide(side);
+  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+    setViewSide(side);
+  }}
 
   const pxc = c[12] || 0;
   const pyc = c[13] || 0;
-  const cx = c[1] + pxc;
-  const cy = c[2] + pyc;
+  const crot = c[5];
+  const rad = crot * (Math.PI / 180);
+  const cx = c[1] + pxc * Math.cos(rad) - pyc * Math.sin(rad);
+  const cy = c[2] + pxc * Math.sin(rad) + pyc * Math.cos(rad);
   const cw = c[3];
   const ch = c[4];
 
-  const fitScale = Math.min((canvas.width * 0.35) / Math.max(cw, 2.0), (canvas.height * 0.35) / Math.max(ch, 2.0));
-  scale = Math.max(scale, Math.min(fitScale, 20.0 * window.devicePixelRatio));
-  panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
-  panY = canvas.height / 2 + cy * scale;
+  if (autoPan) {{
+    const fitScale = Math.min((canvas.width * 0.35) / Math.max(cw, 2.0), (canvas.height * 0.35) / Math.max(ch, 2.0));
+    scale = Math.max(scale, Math.min(fitScale, 20.0 * window.devicePixelRatio));
+    panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
+    panY = canvas.height / 2 + cy * scale;
+  }}
 
   const insp = document.getElementById('inspector-comp');
   insp.style.display = 'flex';
@@ -2625,6 +2684,9 @@ function renderTPList() {{
         ${{netName ? `<span class="item-badge badge-net" title="Net: ${{netName}}">${{netName}}</span>` : ''}}
       </div>
     `;
+    if (isSel) {{
+      setTimeout(() => row.scrollIntoView({{ block: 'nearest' }}), 0);
+    }}
     row.addEventListener('click', () => selectTestPoint(c));
     container.appendChild(row);
   }}
@@ -2641,16 +2703,25 @@ function renderTPList() {{
   }}
 }}
 
-function selectTestPoint(c) {{
+function selectTestPoint(c, autoPan = true) {{
   selectedTP = c;
   selectedComp = null;
   searchTarget = c[0];
   const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
-  setViewSide(side);
+  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+    setViewSide(side);
+  }}
 
-  scale = Math.max(scale, 16.0 * window.devicePixelRatio);
-  panX = canvas.width / 2 - (mirrorX ? -c[1] : c[1]) * scale;
-  panY = canvas.height / 2 + c[2] * scale;
+  const pxc = c[12] || 0;
+  const pyc = c[13] || 0;
+  const cx = c[1] + pxc;
+  const cy = c[2] + pyc;
+
+  if (autoPan) {{
+    scale = Math.max(scale, 16.0 * window.devicePixelRatio);
+    panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
+    panY = canvas.height / 2 + cy * scale;
+  }}
 
   const insp = document.getElementById('inspector-tp');
   insp.style.display = 'flex';
@@ -2996,8 +3067,83 @@ document.getElementById('btn-search-clear').addEventListener('click', () => {{
   scheduleRender();
 }});
 
+function hitTestCanvas(clientX, clientY) {{
+  if (!board || !board.components) return null;
+  const mx = clientX * window.devicePixelRatio;
+  const my = clientY * window.devicePixelRatio;
+  const [wx, wy] = toWorld(mx, my);
+  const curSideCode = mirrorX ? 1 : 0;
+
+  // 1. Check Test Points first (circular hit test)
+  if (compConfig.showTestpoints) {{
+    for (const c of board.components) {{
+      if (c[10] !== 1) continue;
+      if (c[7] !== curSideCode) continue;
+
+      const pxc = c[12] || 0;
+      const pyc = c[13] || 0;
+      const tpx = c[1] + pxc;
+      const tpy = c[2] + pyc;
+      const r = Math.max(c[3], c[4], 0.8) / 2.0;
+      const hitR = Math.max(r + 0.35, 6.0 / scale);
+
+      if (Math.hypot(wx - tpx, wy - tpy) <= hitR) {{
+        return {{ type: 'tp', item: c }};
+      }}
+    }}
+  }}
+
+  // 2. Check Components (rotated courtyard hit test)
+  if (compConfig.showPackages) {{
+    let bestComp = null;
+    let bestArea = Infinity;
+
+    for (const c of board.components) {{
+      if (c[10] === 1) continue;
+      if (c[7] !== curSideCode) continue;
+
+      const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+      const pxc = c[12] || 0;
+      const pyc = c[13] || 0;
+
+      const rad = -crot * (Math.PI / 180);
+      const cosR = Math.cos(rad);
+      const sinR = Math.sin(rad);
+      const dx = wx - cx;
+      const dy = wy - cy;
+      const lx = dx * cosR - dy * sinR;
+      const ly = dx * sinR + dy * cosR;
+
+      const tol = Math.max(0.2, 4.0 / scale);
+      const minX = pxc - cw / 2 - tol;
+      const maxX = pxc + cw / 2 + tol;
+      const minY = pyc - ch / 2 - tol;
+      const maxY = pyc + ch / 2 + tol;
+
+      if (lx >= minX && lx <= maxX && ly >= minY && ly <= maxY) {{
+        const area = cw * ch;
+        if (area < bestArea) {{
+          bestArea = area;
+          bestComp = c;
+        }}
+      }}
+    }}
+
+    if (bestComp) {{
+      return {{ type: 'comp', item: bestComp }};
+    }}
+  }}
+
+  return null;
+}}
+
+let mouseDownClientX = 0;
+let mouseDownClientY = 0;
+
 // Canvas Interactions: Pan, Zoom & Caliper Measurement Tool
 canvas.addEventListener('mousedown', e => {{
+  mouseDownClientX = e.clientX;
+  mouseDownClientY = e.clientY;
   const mx = e.clientX * window.devicePixelRatio;
   const my = e.clientY * window.devicePixelRatio;
 
@@ -3044,10 +3190,47 @@ canvas.addEventListener('mousemove', e => {{
     const dist = Math.hypot(dx, dy);
     measureDist.textContent = `dX: ${{dx.toFixed(3)}} mm, dY: ${{dy.toFixed(3)}} mm | Dist: ${{dist.toFixed(3)}} mm`;
     scheduleRender();
+  }} else if (!e.shiftKey) {{
+    // Hover hit-test: show pointer cursor when hovering over clickable component or TP
+    const hit = hitTestCanvas(e.clientX, e.clientY);
+    if (hit) {{
+      canvas.style.cursor = 'pointer';
+      canvas.title = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
+    }} else {{
+      canvas.style.cursor = 'default';
+      canvas.title = '';
+    }}
   }}
 
   const [wx, wy] = toWorld(mx, my);
   posCoords.textContent = `X: ${{wx.toFixed(3)}} mm, Y: ${{wy.toFixed(3)}} mm`;
+}});
+
+// Canvas Direct Click Selection for Components & Test Points
+canvas.addEventListener('click', e => {{
+  const dragDist = Math.hypot(e.clientX - mouseDownClientX, e.clientY - mouseDownClientY);
+  if (dragDist > 5 || isMeasuring || e.shiftKey) return;
+
+  const hit = hitTestCanvas(e.clientX, e.clientY);
+  if (hit) {{
+    if (hit.type === 'tp') {{
+      switchTab('tab-tps');
+      selectTestPoint(hit.item, false);
+    }} else if (hit.type === 'comp') {{
+      switchTab('tab-comps');
+      selectComponent(hit.item, false);
+    }}
+  }} else {{
+    // Clicked empty board area: deselect
+    selectedComp = null;
+    selectedTP = null;
+    searchTarget = null;
+    document.getElementById('inspector-comp').style.display = 'none';
+    document.getElementById('inspector-tp').style.display = 'none';
+    renderCompList();
+    renderTPList();
+    scheduleRender();
+  }}
 }});
 
 canvas.addEventListener('wheel', e => {{
