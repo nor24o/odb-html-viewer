@@ -4312,33 +4312,33 @@ initData();
     return html_template
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Autonomous ODB++ HTML5 Standalone Viewer Compiler."
-    )
-    parser.add_argument("odb_input", help="Path to ODB++ .zip, .tgz, .tar.gz, or extracted directory")
-    parser.add_argument("-o", "--output", default="pcb_viewer.html", help="Output HTML file path")
-    parser.add_argument("-s", "--step", default=None, help="Target step name (defaults to primary step)")
-    parser.add_argument("--include-inner", action="store_true", help="Include inner copper signal layers")
-    args = parser.parse_args()
-
-    if not os.path.exists(args.odb_input):
-        print(f"Error: Input source '{args.odb_input}' does not exist.", file=sys.stderr)
-        sys.exit(1)
+def compile_odb_to_html(
+    odb_input,
+    output_path="pcb_viewer.html",
+    step=None,
+    include_inner=False,
+    log_fn=print,
+):
+    """Compiles an ODB++ archive or directory into a standalone HTML5 viewer.
+    
+    Returns a dictionary of compilation metadata.
+    """
+    if not os.path.exists(odb_input):
+        raise FileNotFoundError(f"Input source '{odb_input}' does not exist.")
 
     # 1. Step Detection & Source Resolution
-    primary_step, available_steps = get_available_steps(args.odb_input)
-    step = args.step if args.step else primary_step
-    print(f"Detected ODB++ Steps: {available_steps} -> Active: '{step}'")
+    primary_step, available_steps = get_available_steps(odb_input)
+    target_step = step if step else primary_step
+    log_fn(f"Detected ODB++ Steps: {available_steps} -> Active: '{target_step}'")
 
     # 2. Parse Matrix Stackup
-    matrix_content, _ = read_file_from_source(args.odb_input, "matrix/matrix")
+    matrix_content, _ = read_file_from_source(odb_input, "matrix/matrix")
     matrix_meta = parse_matrix_file(matrix_content)
 
     # 3. Parse Board Profile (Outline & Cutouts)
-    profile_content, _ = read_file_from_source(args.odb_input, "profile", preferred_step=step)
+    profile_content, _ = read_file_from_source(odb_input, "profile", preferred_step=target_step)
     if not profile_content:
-        profile_content, _ = read_file_from_source(args.odb_input, "layers/outline/features", preferred_step=step)
+        profile_content, _ = read_file_from_source(odb_input, "layers/outline/features", preferred_step=target_step)
     outline_loops = parse_odb_profile(profile_content) if profile_content else []
 
     # Compute Board Extents Bounding Box
@@ -4358,38 +4358,38 @@ def main():
                 max_y = max(max_y, cmd[2] + cmd[3])
 
     # 4. Parse EDA Footprint Packages and Placement Definitions
-    eda_content, _ = read_file_from_source(args.odb_input, "eda/data", preferred_step=step)
+    eda_content, _ = read_file_from_source(odb_input, "eda/data", preferred_step=target_step)
     packages, pkg_list = parse_eda_packages(eda_content)
 
-    comp_top_raw, _ = read_file_from_source(args.odb_input, "comp_+_top/components", preferred_step=step)
-    comp_bot_raw, _ = read_file_from_source(args.odb_input, "comp_+_bot/components", preferred_step=step)
+    comp_top_raw, _ = read_file_from_source(odb_input, "comp_+_top/components", preferred_step=target_step)
+    comp_bot_raw, _ = read_file_from_source(odb_input, "comp_+_bot/components", preferred_step=target_step)
     top_components = parse_components_with_packages(comp_top_raw, packages, pkg_list, side="TOP")
     bot_components = parse_components_with_packages(comp_bot_raw, packages, pkg_list, side="BOTTOM")
     components = top_components + bot_components
 
     # 4b. Parse Electrical Nets & Signal Connectivity (including Physical Copper Traces & Vias)
-    final_nets, comp_nets = parse_eda_nets(eda_content, top_components, bot_components, source=args.odb_input, step=step)
+    final_nets, comp_nets = parse_eda_nets(eda_content, top_components, bot_components, source=odb_input, step=target_step)
     tp_count = sum(1 for c in components if c[10] == 1)
     std_comp_count = len(components) - tp_count
-    print(f"Extracted {len(components)} component footprints ({std_comp_count} components, {tp_count} test points) and {len(final_nets)} electrical nets.")
+    log_fn(f"Extracted {len(components)} component footprints ({std_comp_count} components, {tp_count} test points) and {len(final_nets)} electrical nets.")
 
     # 5. Discover Layer Features for the Target Step
-    norm_step = f"steps/{step.lower()}/layers/"
+    norm_step = f"steps/{target_step.lower()}/layers/"
     avail_layers = []
-    if os.path.isdir(args.odb_input):
-        step_dir = os.path.join(args.odb_input, "steps", step, "layers")
+    if os.path.isdir(odb_input):
+        step_dir = os.path.join(odb_input, "steps", target_step, "layers")
         if os.path.exists(step_dir):
             avail_layers = [d for d in os.listdir(step_dir) if os.path.isdir(os.path.join(step_dir, d))]
-    elif zipfile.is_zipfile(args.odb_input):
-        with zipfile.ZipFile(args.odb_input, "r") as z:
+    elif zipfile.is_zipfile(odb_input):
+        with zipfile.ZipFile(odb_input, "r") as z:
             for name in z.namelist():
                 nl = name.replace("\\", "/").lower()
                 if nl.endswith("/features") and norm_step in nl:
                     parts = nl.split(norm_step)[1].split("/")
                     if len(parts) >= 2:
                         avail_layers.append(parts[0])
-    elif tarfile.is_tarfile(args.odb_input):
-        with tarfile.open(args.odb_input, "r:*") as t:
+    elif tarfile.is_tarfile(odb_input):
+        with tarfile.open(odb_input, "r:*") as t:
             for member in t.getmembers():
                 nl = member.name.replace("\\", "/").lower()
                 if nl.endswith("/features") and norm_step in nl:
@@ -4447,10 +4447,10 @@ def main():
             continue
 
         # Skip inner layers unless explicitly requested
-        if side == "INNER" and not args.include_inner:
+        if side == "INNER" and not include_inner:
             continue
 
-        features_data, _ = read_file_from_source(args.odb_input, f"layers/{l_name}/features", preferred_step=step)
+        features_data, _ = read_file_from_source(odb_input, f"layers/{l_name}/features", preferred_step=target_step)
         if not features_data:
             continue
 
@@ -4538,7 +4538,7 @@ def main():
         min_x, min_y, max_x, max_y = 0.0, 0.0, 100.0, 100.0
 
     board_payload = {
-        "step": step,
+        "step": target_step,
         "bbox": [round(min_x, 2), round(min_y, 2), round(max_x, 2), round(max_y, 2)],
         "profile": {
             "color": "#e5c07b",
@@ -4551,16 +4551,50 @@ def main():
     }
 
     html_out = build_viewer_html(board_payload)
-    output_path = os.path.abspath(args.output)
-    with open(output_path, "w", encoding="utf-8") as f:
+    output_abs = os.path.abspath(output_path)
+    with open(output_abs, "w", encoding="utf-8") as f:
         f.write(html_out)
 
-    size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"Generated standalone viewer: {output_path} ({size_mb:.2f} MB)")
+    size_mb = os.path.getsize(output_abs) / (1024 * 1024)
+    log_fn(f"Generated standalone viewer: {output_abs} ({size_mb:.2f} MB)")
     if size_mb > 2.5:
-        print(f"WARNING: Output file size ({size_mb:.2f} MB) exceeds 2.5 MB limit!", file=sys.stderr)
+        log_fn(f"WARNING: Output file size ({size_mb:.2f} MB) exceeds 2.5 MB limit!")
     else:
-        print(f"SUCCESS: Output file size ({size_mb:.2f} MB) is well under the 2.5 MB gate.")
+        log_fn(f"SUCCESS: Output file size ({size_mb:.2f} MB) is well under the 2.5 MB gate.")
+
+    return {
+        "output_path": output_abs,
+        "size_mb": size_mb,
+        "step": target_step,
+        "available_steps": available_steps,
+        "components_count": len(components),
+        "testpoints_count": tp_count,
+        "nets_count": len(final_nets),
+        "layers_count": len(parsed_layers),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Autonomous ODB++ HTML5 Standalone Viewer Compiler."
+    )
+    parser.add_argument("odb_input", help="Path to ODB++ .zip, .tgz, .tar.gz, or extracted directory")
+    parser.add_argument("-o", "--output", default="pcb_viewer.html", help="Output HTML file path")
+    parser.add_argument("-s", "--step", default=None, help="Target step name (defaults to primary step)")
+    parser.add_argument("--include-inner", action="store_true", help="Include inner copper signal layers")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.odb_input):
+        print(f"Error: Input source '{args.odb_input}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    compile_odb_to_html(
+        odb_input=args.odb_input,
+        output_path=args.output,
+        step=args.step,
+        include_inner=args.include_inner,
+        log_fn=print,
+    )
 
 
 if __name__ == "__main__":

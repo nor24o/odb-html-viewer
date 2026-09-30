@@ -36,3 +36,8 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
