@@ -1664,6 +1664,7 @@ def build_viewer_html(board_data):
     <canvas id="pcbCanvas"></canvas>
     <div id="hud">
       Cursor: <span class="hl" id="pos-coords">X: 0.000 mm, Y: 0.000 mm</span> | 
+      Hover: <span class="hl" id="hover-target">None</span> | 
       Board: <span class="hl" id="board-dims">--</span> | 
       View: <span class="side" id="view-side">TOP</span> | 
       Zoom: <span class="hl" id="zoom-level">100%</span>
@@ -1756,6 +1757,7 @@ const canvas = document.getElementById('pcbCanvas');
 const container = document.getElementById('canvas-container');
 const ctx = canvas.getContext('2d');
 const posCoords = document.getElementById('pos-coords');
+const hoverTarget = document.getElementById('hover-target');
 const boardDims = document.getElementById('board-dims');
 const viewSide = document.getElementById('view-side');
 const zoomLevel = document.getElementById('zoom-level');
@@ -1914,8 +1916,13 @@ function onDataReady(data) {{
 
   // Precompile Path2D for each layer chunk and delta-encoded surfaces
   for (const layer of board.layers) {{
-    if (layer.chunks) {{
+    const hasChunks = layer.chunks && layer.chunks.length > 0;
+    if (hasChunks) {{
       for (const chunk of layer.chunks) {{
+        chunk.circlePads = [];
+        chunk.circleVias = [];
+        chunk.rectList = [];
+
         if (chunk.lines) {{
           for (const grp of chunk.lines) {{
             const p = new Path2D();
@@ -1939,17 +1946,114 @@ function onDataReady(data) {{
           }}
         }}
       }}
-    }}
 
-    // Circular Gold Pads & Vias: flat [x, y, r, ...]
-    if (layer.circles && layer.circles.length > 0) {{
-      const p = new Path2D();
-      const c = layer.circles;
-      for (let i = 0; i < c.length; i += 3) {{
-        p.moveTo(c[i] + c[i+2], c[i+1]);
-        p.arc(c[i], c[i+1], c[i+2], 0, Math.PI * 2);
+      // Spatial distribution of circles into chunks (pads vs subpixel vias)
+      if (layer.circles && layer.circles.length > 0) {{
+        const c = layer.circles;
+        for (let i = 0; i < c.length; i += 3) {{
+          const cx = c[i], cy = c[i+1], r = c[i+2];
+          for (const chunk of layer.chunks) {{
+            const b = chunk.b;
+            if (cx >= b[0] - r && cx <= b[2] + r && cy >= b[1] - r && cy <= b[3] + r) {{
+              if (r >= 0.45) chunk.circlePads.push(cx, cy, r);
+              else chunk.circleVias.push(cx, cy, r);
+              break;
+            }}
+          }}
+        }}
       }}
-      layer.circlePath = p;
+
+      // Spatial distribution of rects into chunks
+      if (layer.rects && layer.rects.length > 0) {{
+        const r = layer.rects;
+        for (let i = 0; i < r.length; i += 5) {{
+          const x = r[i], y = r[i+1], w = r[i+2], h = r[i+3], ang = r[i+4];
+          const hw = Math.max(w, h);
+          for (const chunk of layer.chunks) {{
+            const b = chunk.b;
+            if (x >= b[0] - hw && x <= b[2] + hw && y >= b[1] - hw && y <= b[3] + hw) {{
+              chunk.rectList.push(x, y, w, h, ang);
+              break;
+            }}
+          }}
+        }}
+      }}
+
+      // Precompile Path2D for each chunk's pads, vias, and rects
+      for (const chunk of layer.chunks) {{
+        if (chunk.circlePads.length > 0) {{
+          const p = new Path2D();
+          const cl = chunk.circlePads;
+          for (let i = 0; i < cl.length; i += 3) {{
+            p.moveTo(cl[i] + cl[i+2], cl[i+1]);
+            p.arc(cl[i], cl[i+1], cl[i+2], 0, Math.PI * 2);
+          }}
+          chunk.circlePadPath = p;
+        }}
+        if (chunk.circleVias.length > 0) {{
+          const p = new Path2D();
+          const cl = chunk.circleVias;
+          for (let i = 0; i < cl.length; i += 3) {{
+            p.moveTo(cl[i] + cl[i+2], cl[i+1]);
+            p.arc(cl[i], cl[i+1], cl[i+2], 0, Math.PI * 2);
+          }}
+          chunk.circleViaPath = p;
+        }}
+        if (chunk.rectList.length > 0) {{
+          const p = new Path2D();
+          const rl = chunk.rectList;
+          for (let i = 0; i < rl.length; i += 5) {{
+            const x = rl[i], y = rl[i+1], w = rl[i+2], h = rl[i+3], ang = rl[i+4];
+            if (ang === 0) {{
+              p.rect(x - w / 2, y - h / 2, w, h);
+            }} else {{
+              const rad = ang * (Math.PI / 180);
+              const cos = Math.cos(rad);
+              const sin = Math.sin(rad);
+              const hw = w / 2, hh = h / 2;
+              p.moveTo(x - hw * cos + hh * sin, y - hw * sin - hh * cos);
+              p.lineTo(x + hw * cos + hh * sin, y + hw * sin - hh * cos);
+              p.lineTo(x + hw * cos - hh * sin, y + hw * sin + hh * cos);
+              p.lineTo(x - hw * cos - hh * sin, y - hw * sin + hh * cos);
+              p.closePath();
+            }}
+          }}
+          chunk.rectPath = p;
+        }}
+      }}
+    }} else {{
+      // Fallback for layers without chunks (e.g. non-chunked drill holes)
+      if (layer.circles && layer.circles.length > 0) {{
+        const p = new Path2D();
+        const c = layer.circles;
+        for (let i = 0; i < c.length; i += 3) {{
+          p.moveTo(c[i] + c[i+2], c[i+1]);
+          p.arc(c[i], c[i+1], c[i+2], 0, Math.PI * 2);
+        }}
+        layer.circlePath = p;
+      }}
+      if (layer.rects && layer.rects.length > 0) {{
+        const p = new Path2D();
+        const r = layer.rects;
+        for (let i = 0; i < r.length; i += 5) {{
+          const x = r[i], y = r[i+1], w = r[i+2], h = r[i+3], ang = r[i+4];
+          if (ang === 0) {{
+            p.rect(x - w / 2, y - h / 2, w, h);
+          }} else {{
+            const rad = ang * (Math.PI / 180);
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const hw = w / 2;
+            const hh = h / 2;
+            p.moveTo(x - hw * cos + hh * sin, y - hw * sin - hh * cos);
+            p.lineTo(x + hw * cos + hh * sin, y + hw * sin - hh * cos);
+            p.lineTo(x + hw * cos - hh * sin, y + hw * sin + hh * cos);
+            p.lineTo(x - hw * cos - hh * sin, y - hw * sin + hh * cos);
+            p.closePath();
+          }}
+        }}
+        layer.rectPath = p;
+      }}
     }}
 
     // Delta-encoded Surface Pours & Silkscreen Polygons: [[lx, ly, dx1, dy1, ...], ...]
@@ -1969,30 +2073,6 @@ function onDataReady(data) {{
       }}
       layer.surfacePath = p;
     }}
-
-    // Rectangular Gold Pads: precompile into a single Path2D per layer for maximum GPU speed
-    if (layer.rects && layer.rects.length > 0) {{
-      const p = new Path2D();
-      const r = layer.rects;
-      for (let i = 0; i < r.length; i += 5) {{
-        const x = r[i], y = r[i+1], w = r[i+2], h = r[i+3], ang = r[i+4];
-        if (ang === 0) {{
-          p.rect(x - w / 2, y - h / 2, w, h);
-        }} else {{
-          const rad = ang * (Math.PI / 180);
-          const cos = Math.cos(rad);
-          const sin = Math.sin(rad);
-          const hw = w / 2;
-          const hh = h / 2;
-          p.moveTo(x - hw * cos + hh * sin, y - hw * sin - hh * cos);
-          p.lineTo(x + hw * cos + hh * sin, y + hw * sin - hh * cos);
-          p.lineTo(x + hw * cos - hh * sin, y + hw * sin + hh * cos);
-          p.lineTo(x - hw * cos - hh * sin, y - hw * sin + hh * cos);
-          p.closePath();
-        }}
-      }}
-      layer.rectPath = p;
-    }}
   }}
 
   document.getElementById('loader').style.display = 'none';
@@ -2011,6 +2091,57 @@ function onDataReady(data) {{
       if (c[10] === 1) {{
         tpMap.set(ref.toLowerCase(), c);
       }}
+
+      // Precompute static world center and text geometry once
+      const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+      const isTP = c[10] === 1;
+      const isLargeIC = c[11] === 1;
+      const pxc = c[12] || 0, pyc = c[13] || 0;
+      const bodyAxis = c[14] !== undefined ? c[14] : (cw >= ch ? 0 : 1);
+
+      const rad = crot * (Math.PI / 180);
+      const cosR = Math.cos(rad);
+      const sinR = Math.sin(rad);
+      c.wx = cx + pxc * cosR - pyc * sinR;
+      c.wy = cy + pxc * sinR + pyc * cosR;
+
+      let bodyLen, bodyThick, lx, ly;
+      if (isTP) {{
+        const r = Math.max(cw, ch, 0.8) / 2.0;
+        bodyLen = r * 2.0; bodyThick = r * 2.0; lx = 1; ly = 0;
+      }} else if (bodyAxis === 1) {{
+        bodyLen = Math.max(ch, 0.5); bodyThick = Math.max(cw, 0.5); lx = 0; ly = 1;
+      }} else {{
+        bodyLen = Math.max(cw, 0.5); bodyThick = Math.max(ch, 0.5); lx = 1; ly = 0;
+      }}
+
+      let fontMm;
+      if (isTP) {{
+        fontMm = Math.min((bodyLen * 0.82) / (ref.length * 0.55), bodyThick * 0.85, 1.2);
+      }} else if (isLargeIC) {{
+        fontMm = Math.min(bodyThick * 0.45, 2.2);
+        if (fontMm * 0.58 * ref.length > bodyLen * 0.85) {{
+          fontMm = (bodyLen * 0.85) / (ref.length * 0.58);
+        }}
+        fontMm = Math.max(fontMm, 0.4);
+      }} else {{
+        fontMm = Math.min(bodyThick * 0.70, (bodyLen * 0.88) / (ref.length * 0.55), 1.2);
+        fontMm = Math.max(fontMm, 0.25);
+      }}
+      c.fontMm = fontMm;
+
+      const wDirX = lx * cosR - ly * sinR;
+      const wDirY = lx * sinR + ly * cosR;
+
+      let angTop = Math.atan2(-wDirY, wDirX);
+      if (angTop > Math.PI / 2) angTop -= Math.PI;
+      else if (angTop < -Math.PI / 2) angTop += Math.PI;
+      c.textAngTop = angTop;
+
+      let angBot = Math.atan2(-wDirY, -wDirX);
+      if (angBot > Math.PI / 2) angBot -= Math.PI;
+      else if (angBot < -Math.PI / 2) angBot += Math.PI;
+      c.textAngBot = angBot;
     }}
   }}
 
@@ -2355,8 +2486,9 @@ function render() {{
       ctx.fill(layer.surfacePath, 'evenodd');
     }}
 
-    // Spatial Chunk Culled Traces & Arcs
-    if (layer.chunks) {{
+    // Spatial Chunk Culled Traces, Arcs, Pads, and Vias
+    const drawVias = scale >= 5.5;
+    if (layer.chunks && layer.chunks.length > 0) {{
       for (const chunk of layer.chunks) {{
         const b = chunk.b;
         if (b[0] > vMaxX || b[2] < vMinX || b[1] > vMaxY || b[3] < vMinY) continue;
@@ -2373,17 +2505,24 @@ function render() {{
             ctx.stroke(grp.path);
           }}
         }}
+        if (chunk.circlePadPath) {{
+          ctx.fill(chunk.circlePadPath);
+        }}
+        if (drawVias && chunk.circleViaPath) {{
+          ctx.fill(chunk.circleViaPath);
+        }}
+        if (chunk.rectPath) {{
+          ctx.fill(chunk.rectPath);
+        }}
       }}
-    }}
-
-    // Circular Gold Pads & Vias
-    if (layer.circlePath) {{
-      ctx.fill(layer.circlePath);
-    }}
-
-    // Rectangular Gold Pads (Precompiled Path2D for Maximum GPU Speed)
-    if (layer.rectPath) {{
-      ctx.fill(layer.rectPath);
+    }} else {{
+      // Fallback for layers without spatial chunks (e.g. non-chunked drill holes)
+      if (layer.circlePath && (drawVias || layer.type !== 'DRILL')) {{
+        ctx.fill(layer.circlePath);
+      }}
+      if (layer.rectPath) {{
+        ctx.fill(layer.rectPath);
+      }}
     }}
   }}
   ctx.globalAlpha = 1.0;
@@ -2691,88 +2830,31 @@ function render() {{
     ctx.save();
     ctx.lineJoin = 'round';
 
+    const minFontPx = isDragging ? 9.0 : 6.5;
+
     for (const cmp of board.components) {{
       if (cmp[7] !== curSideCode) continue;
 
       const ref = cmp[0];
-      const cx = cmp[1], cy = cmp[2], cw = cmp[3], ch = cmp[4], crot = cmp[5];
       const isTP = cmp[10] === 1;
-      const isLargeIC = cmp[11] === 1;
-      const pxc = cmp[12] || 0;
-      const pyc = cmp[13] || 0;
-      const bodyAxis = cmp[14] !== undefined ? cmp[14] : (cw >= ch ? 0 : 1);
       const isTarget = targetsToHighlight.has(ref.toLowerCase());
 
       if (isTP && !compConfig.showTestpoints && !isTarget) continue;
       if (!isTP && !compConfig.showPackages && !isTarget) continue;
 
-      // World center of component package
-      const rad = crot * (Math.PI / 180);
-      const cosR = Math.cos(rad);
-      const sinR = Math.sin(rad);
-      const wx = cx + pxc * cosR - pyc * sinR;
-      const wy = cy + pxc * sinR + pyc * cosR;
-
-      // Screen center
-      const [sx, sy] = toScreen(wx, wy);
-
-      // Frustum culling on screen
-      if (sx < -100 || sx > canvas.width + 100 || sy < -100 || sy > canvas.height + 100) continue;
-
-      // Determine dimensions along text axis and perpendicular axis
-      let bodyLen, bodyThick, lx, ly;
-      if (isTP) {{
-        const r = Math.max(cw, ch, 0.8) / 2.0;
-        bodyLen = r * 2.0;
-        bodyThick = r * 2.0;
-        lx = 1; ly = 0;
-      }} else if (bodyAxis === 1) {{
-        bodyLen = Math.max(ch, 0.5);
-        bodyThick = Math.max(cw, 0.5);
-        lx = 0; ly = 1;
-      }} else {{
-        bodyLen = Math.max(cw, 0.5);
-        bodyThick = Math.max(ch, 0.5);
-        lx = 1; ly = 0;
-      }}
-
-      // Font size calculation (mm & screen pixels)
-      let fontMm;
-      if (isTP) {{
-        fontMm = Math.min((bodyLen * 0.82) / (ref.length * 0.55), bodyThick * 0.85, 1.2);
-      }} else if (isLargeIC) {{
-        fontMm = Math.min(bodyThick * 0.45, 2.2);
-        if (fontMm * 0.58 * ref.length > bodyLen * 0.85) {{
-          fontMm = (bodyLen * 0.85) / (ref.length * 0.58);
-        }}
-        fontMm = Math.max(fontMm, 0.4);
-      }} else {{
-        // Passives & Small SMD Components (R5206, C5202, etc.)
-        fontMm = Math.min(bodyThick * 0.70, (bodyLen * 0.88) / (ref.length * 0.55), 1.2);
-        fontMm = Math.max(fontMm, 0.25);
-      }}
-
-      let fontPx = fontMm * scale;
+      let fontPx = cmp.fontMm * scale;
       if (isTarget) {{
         fontPx = Math.max(fontPx, 11.0);
-      }} else if (fontPx < 6.5) {{
-        // LOD threshold: cull tiny illegible text to maintain 60 FPS
+      }} else if (fontPx < minFontPx) {{
         continue;
       }}
 
-      // Calculate Screen Angle of Text
-      const wDirX = lx * cosR - ly * sinR;
-      const wDirY = lx * sinR + ly * cosR;
-      const sDirX = wDirX * (mirrorX ? -1 : 1);
-      const sDirY = -wDirY;
+      // Screen center from precomputed world coordinates
+      const [sx, sy] = toScreen(cmp.wx, cmp.wy);
+      if (sx < -80 || sx > canvas.width + 80 || sy < -80 || sy > canvas.height + 80) continue;
 
-      let textAngle = Math.atan2(sDirY, sDirX);
-      // Guarantee text is never upside-down or reading right-to-left
-      if (textAngle > Math.PI / 2) {{
-        textAngle -= Math.PI;
-      }} else if (textAngle < -Math.PI / 2) {{
-        textAngle += Math.PI;
-      }}
+      const textAngle = mirrorX ? cmp.textAngBot : cmp.textAngTop;
+      const fontSize = Math.round(fontPx);
 
       ctx.save();
       ctx.translate(sx, sy);
@@ -2780,7 +2862,6 @@ function render() {{
         ctx.rotate(textAngle);
       }}
 
-      const fontSize = Math.round(fontPx);
       ctx.font = `600 ${{fontSize}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -2795,7 +2876,7 @@ function render() {{
         ctx.fillStyle = '#ff3333';
       }} else if (isTP) {{
         ctx.fillStyle = '#00e5ff';
-      }} else if (isLargeIC) {{
+      }} else if (cmp[11] === 1) {{
         ctx.fillStyle = '#ffb347';
       }} else {{
         ctx.fillStyle = '#f0f4f8';
@@ -4067,6 +4148,23 @@ let isPointerDown = false;
 let hoverRafId = null;
 let lastHoverX = 0;
 let lastHoverY = 0;
+let coordRafId = null;
+let lastMoveClientX = 0;
+let lastMoveClientY = 0;
+
+function updateCoords(clientX, clientY) {{
+  lastMoveClientX = clientX;
+  lastMoveClientY = clientY;
+  if (!coordRafId) {{
+    coordRafId = requestAnimationFrame(() => {{
+      coordRafId = null;
+      const mx = lastMoveClientX * window.devicePixelRatio;
+      const my = lastMoveClientY * window.devicePixelRatio;
+      const [wx, wy] = toWorld(mx, my);
+      posCoords.textContent = `X: ${{wx.toFixed(3)}} mm, Y: ${{wy.toFixed(3)}} mm`;
+    }});
+  }}
+}}
 
 function scheduleHoverTest(clientX, clientY) {{
   lastHoverX = clientX;
@@ -4077,15 +4175,15 @@ function scheduleHoverTest(clientX, clientY) {{
       const hit = hitTestCanvas(lastHoverX, lastHoverY);
       if (hit) {{
         canvas.style.cursor = 'pointer';
-        canvas.title = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
+        hoverTarget.textContent = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
       }} else {{
         const hitNet = hitTestTrace(lastHoverX, lastHoverY);
         if (hitNet) {{
           canvas.style.cursor = 'pointer';
-          canvas.title = `Trace: ${{hitNet[0]}}`;
+          hoverTarget.textContent = `Trace: ${{hitNet[0]}}`;
         }} else {{
           canvas.style.cursor = 'default';
-          canvas.title = '';
+          hoverTarget.textContent = 'None';
         }}
       }}
     }});
@@ -4094,6 +4192,7 @@ function scheduleHoverTest(clientX, clientY) {{
 
 // Canvas Interactions: Pan, Zoom, Multi-Select & Caliper Measurement Tool
 canvas.addEventListener('mousedown', e => {{
+  if (e.button !== 0 && e.button !== 1) return;
   mouseDownClientX = e.clientX;
   mouseDownClientY = e.clientY;
   isPointerDown = true;
@@ -4112,15 +4211,19 @@ canvas.addEventListener('mousedown', e => {{
 }});
 
 window.addEventListener('mouseup', () => {{
+  const wasDragging = isDragging;
   isPointerDown = false;
   isDragging = false;
   if (isMeasuring) {{
     isMeasuring = false;
     container.classList.remove('crosshair');
   }}
+  if (wasDragging) {{
+    scheduleRender();
+  }}
 }});
 
-canvas.addEventListener('mousemove', e => {{
+window.addEventListener('mousemove', e => {{
   const mx = e.clientX * window.devicePixelRatio;
   const my = e.clientY * window.devicePixelRatio;
 
@@ -4150,12 +4253,13 @@ canvas.addEventListener('mousemove', e => {{
       }}
     }}
   }} else {{
-    // High-performance throttled hover hit-test
-    scheduleHoverTest(e.clientX, e.clientY);
+    // High-performance throttled hover hit-test (only when mouse is over canvas)
+    if (e.target === canvas) {{
+      scheduleHoverTest(e.clientX, e.clientY);
+    }}
   }}
 
-  const [wx, wy] = toWorld(mx, my);
-  posCoords.textContent = `X: ${{wx.toFixed(3)}} mm, Y: ${{wy.toFixed(3)}} mm`;
+  updateCoords(e.clientX, e.clientY);
 }});
 
 // Canvas Direct Click Selection for Components, Test Points & Traces
@@ -4206,8 +4310,9 @@ canvas.addEventListener('wheel', e => {{
   const my = e.clientY * window.devicePixelRatio;
 
   const [wx, wy] = toWorld(mx, my);
-  const factor = e.deltaY < 0 ? 1.15 : 0.85;
-  scale *= factor;
+  const delta = e.deltaMode === 1 ? e.deltaY * 20 : (e.deltaMode === 2 ? e.deltaY * 100 : e.deltaY);
+  const zoomFactor = Math.pow(0.998, delta);
+  scale = Math.min(Math.max(scale * zoomFactor, 0.2), 100.0 * (window.devicePixelRatio || 1));
 
   panX = mx - (mirrorX ? -wx : wx) * scale;
   panY = my + wy * scale;
@@ -4441,7 +4546,7 @@ def main():
             order = 20
         elif l_type == "SOLDER_MASK" and side == "TOP":
             color = "#c49c3e"  # Top Gold / ENIG SMT Pads & Vias
-            is_visible = True
+            is_visible = False
             order = 35
         elif l_type == "SOLDER_MASK" and side == "BOTTOM":
             color = "#c49c3e"  # Bottom Gold / ENIG SMT Pads
