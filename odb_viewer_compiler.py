@@ -2655,31 +2655,25 @@ function render() {{
       ctx.save();
       ctx.translate(cx, cy);
       if (isTP) {{
+        // Clean highlight around testpoint perimeter (no opaque overlay, no target ring)
         const r = Math.max(cw, ch, 0.8) / 2.0;
-        ctx.fillStyle = '#ff2222';
+        ctx.strokeStyle = '#ffe600';
+        ctx.lineWidth = Math.max(0.25, 2.0 / scale);
         ctx.beginPath();
         ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = Math.max(0.22, 1.5 / scale);
         ctx.stroke();
       }} else {{
+        // Clean highlight around component courtyard perimeter (no target ring)
         ctx.rotate(crot * (Math.PI / 180));
-        ctx.strokeStyle = '#ff2222';
-        ctx.lineWidth = Math.max(0.3, 2.5 / scale);
+        ctx.strokeStyle = '#ffe600';
+        ctx.lineWidth = Math.max(0.25, 2.0 / scale);
         ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
       }}
-      // Target ring
-      ctx.strokeStyle = '#ff2222';
-      ctx.lineWidth = Math.max(0.3, 2.5 / scale);
-      ctx.beginPath();
-      ctx.arc(pxc, pyc, Math.max(cw, ch) * 0.85, 0, Math.PI * 2);
-      ctx.stroke();
       ctx.restore();
     }}
   }}
 
-  // 6. Selected Traces / Nets: Multi-Trace Physical Copper Routes, Vias & Connected Pins
+  // 6. Selected Traces / Nets: Multi-Trace Physical Copper Routes & Vias (Clean highlight, no overlays)
   if (selectedNets.size > 0) {{
     const curSideCode = mirrorX ? 1 : 0;
     let netIdx = 0;
@@ -2698,7 +2692,7 @@ function render() {{
         ctx.save();
         ctx.strokeStyle = netColor;
         ctx.globalAlpha = 0.35;
-        ctx.lineWidth = Math.max(0.20, 1.6 / scale);
+        ctx.lineWidth = Math.max(0.18, 1.4 / scale);
         ctx.setLineDash([4 / scale, 3 / scale]);
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
@@ -2712,26 +2706,12 @@ function render() {{
         ctx.stroke();
         ctx.restore();
 
-        // 2. Current Side Copper Routing (Bright Glowing Highlight)
+        // 2. Current Side Copper Routing: Crisp direct highlight in net color (no white core overlay)
         ctx.save();
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-
-        // Outer luminous halo
         ctx.strokeStyle = netColor;
-        ctx.lineWidth = Math.max(0.60, 3.8 / scale);
-        ctx.beginPath();
-        for (let i = 0; i < traceSegs.length; i += 5) {{
-          if (traceSegs[i] === curSideCode) {{
-            ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
-            ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
-          }}
-        }}
-        ctx.stroke();
-
-        // High-contrast bright core
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = Math.max(0.25, 1.8 / scale);
+        ctx.lineWidth = Math.max(0.40, 2.8 / scale);
         ctx.beginPath();
         for (let i = 0; i < traceSegs.length; i += 5) {{
           if (traceSegs[i] === curSideCode) {{
@@ -2759,57 +2739,17 @@ function render() {{
         ctx.restore();
       }}
 
-      // --- B. Vias on Net ---
+      // --- B. Vias on Net (clean ring outline in net color, no opaque overlays) ---
       if (netVias.length > 0) {{
         ctx.save();
+        ctx.strokeStyle = netColor;
+        ctx.lineWidth = Math.max(0.25, 1.8 / scale);
         for (let i = 0; i < netVias.length; i += 2) {{
           const vx = netVias[i], vy = netVias[i + 1];
-          // Via copper pad ring
-          ctx.fillStyle = netColor;
           ctx.beginPath();
           ctx.arc(vx, vy, Math.max(0.35, 2.5 / scale), 0, Math.PI * 2);
-          ctx.fill();
-
-          // Via drill hole center
-          ctx.fillStyle = '#0d1117';
-          ctx.beginPath();
-          ctx.arc(vx, vy, Math.max(0.18, 1.2 / scale), 0, Math.PI * 2);
-          ctx.fill();
+          ctx.stroke();
         }}
-        ctx.restore();
-      }}
-
-      // --- C. Connected Pin Terminals ---
-      for (const p of netPins) {{
-        const [pside, pref, pname, wx, wy, isTp] = p;
-        const isCurSide = (pside === curSideCode);
-
-        ctx.save();
-        ctx.translate(wx, wy);
-
-        ctx.strokeStyle = netColor;
-        ctx.fillStyle = netColor;
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = Math.max(0.25, 2.0 / scale);
-
-        const r = isTp ? 1.0 : 0.6;
-        ctx.beginPath();
-        ctx.arc(0, 0, r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1.0;
-        ctx.stroke();
-
-        if (isCurSide && scale * 1.5 >= 14) {{
-          ctx.scale(mirrorX ? -1 : 1, -1);
-          const FONT_RES = 64;
-          ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-          ctx.font = `600 ${{Math.round(1.1 * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          ctx.fillStyle = netColor;
-          ctx.fillText(`${{pref}}.${{pname}}`, 0, -r * FONT_RES - 2);
-        }}
-
         ctx.restore();
       }}
     }}
@@ -2844,7 +2784,8 @@ function render() {{
 
       let fontPx = cmp.fontMm * scale;
       if (isTarget) {{
-        fontPx = Math.max(fontPx, 11.0);
+        // Keep font inside component bounds, do not blow up to 11px
+        fontPx = Math.max(fontPx, 5.5);
       }} else if (fontPx < minFontPx) {{
         continue;
       }}
@@ -2871,9 +2812,9 @@ function render() {{
       ctx.strokeStyle = 'rgba(5, 8, 12, 0.95)';
       ctx.strokeText(ref, 0, 0);
 
-      // Distinct, clean fill colors
+      // Distinct, clean fill colors (neon yellow for selected targets)
       if (isTarget) {{
-        ctx.fillStyle = '#ff3333';
+        ctx.fillStyle = '#ffe600';
       }} else if (isTP) {{
         ctx.fillStyle = '#00e5ff';
       }} else if (cmp[11] === 1) {{
