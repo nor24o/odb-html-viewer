@@ -1521,6 +1521,83 @@ def build_viewer_html(board_data):
     margin-left: 6px;
     font-family: monospace;
   }}
+  .layer-op-ctrl {{
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 6px;
+  }}
+  .layer-opacity-slider {{
+    width: 44px;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #232b3b;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }}
+  .layer-opacity-slider::-webkit-slider-thumb {{
+    -webkit-appearance: none;
+    appearance: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #61afef;
+    cursor: pointer;
+    box-shadow: 0 0 2px rgba(0,0,0,0.5);
+  }}
+  .layer-opacity-slider::-moz-range-thumb {{
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #61afef;
+    cursor: pointer;
+    border: none;
+  }}
+  .layer-opacity-val {{
+    font-size: 8.5px;
+    color: #6d7788;
+    font-family: monospace;
+    width: 26px;
+    text-align: right;
+  }}
+  .btn-clear-multi {{
+    background: #182333;
+    border: 1px solid #28374d;
+    color: #8c97aa;
+    font-size: 9.5px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    align-self: flex-start;
+    margin-top: 4px;
+    transition: all 0.15s;
+  }}
+  .btn-clear-multi:hover {{
+    background: #3c1e28;
+    border-color: #ff4d4f;
+    color: #ff7875;
+  }}
+  .chip-rm {{
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 11px;
+    color: #8c97aa;
+    cursor: pointer;
+    font-weight: bold;
+  }}
+  .chip-rm:hover {{
+    color: #ff4d4f;
+  }}
+  .trace-color-dot {{
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }}
   #hud {{
     position: absolute;
     bottom: 14px;
@@ -1701,6 +1778,28 @@ let searchTarget = null;
 let selectedComp = null;
 let selectedTP = null;
 let selectedNet = null;
+const selectedComps = new Map();
+const selectedTPs = new Map();
+const selectedNets = new Map();
+
+const TRACE_PALETTE = [
+  '#ffe600', // 0: Neon Yellow
+  '#00e5ff', // 1: Electric Cyan
+  '#ff2a85', // 2: Hot Magenta
+  '#39ff14', // 3: Neon Green
+  '#ff8c00', // 4: Vivid Orange
+  '#b537f2', // 5: Electric Purple
+  '#00ffcc', // 6: Mint Neon
+  '#ff0055'  // 7: Vivid Crimson
+];
+
+function getNetColor(netName) {{
+  const keys = Array.from(selectedNets.keys());
+  const idx = keys.indexOf(netName.toLowerCase());
+  if (idx === -1) return TRACE_PALETTE[0];
+  return TRACE_PALETTE[idx % TRACE_PALETTE.length];
+}}
+
 let activeTab = 'tab-layers';
 let renderRequested = false;
 
@@ -1714,7 +1813,9 @@ const compConfig = {{
   showPackages: true,
   showTestpoints: true,
   colorPkg: '#00e5ff',
-  colorTP: '#00e5ff'
+  colorTP: '#00e5ff',
+  opacityPkg: 1.0,
+  opacityTP: 1.0
 }};
 
 // Background Web Worker Thread (Unblocks Main UI Thread)
@@ -1867,6 +1968,30 @@ function onDataReady(data) {{
         p.closePath();
       }}
       layer.surfacePath = p;
+    }}
+
+    // Rectangular Gold Pads: precompile into a single Path2D per layer for maximum GPU speed
+    if (layer.rects && layer.rects.length > 0) {{
+      const p = new Path2D();
+      const r = layer.rects;
+      for (let i = 0; i < r.length; i += 5) {{
+        const x = r[i], y = r[i+1], w = r[i+2], h = r[i+3], ang = r[i+4];
+        if (ang === 0) {{
+          p.rect(x - w / 2, y - h / 2, w, h);
+        }} else {{
+          const rad = ang * (Math.PI / 180);
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const hw = w / 2;
+          const hh = h / 2;
+          p.moveTo(x - hw * cos + hh * sin, y - hw * sin - hh * cos);
+          p.lineTo(x + hw * cos + hh * sin, y + hw * sin - hh * cos);
+          p.lineTo(x + hw * cos - hh * sin, y + hw * sin + hh * cos);
+          p.lineTo(x - hw * cos - hh * sin, y - hw * sin + hh * cos);
+          p.closePath();
+        }}
+      }}
+      layer.rectPath = p;
     }}
   }}
 
@@ -2217,10 +2342,13 @@ function render() {{
     // Side culling: immediately discard bottom layers when viewing Top, and vice-versa
     if ((layer.side === 'TOP' && mirrorX) || (layer.side === 'BOTTOM' && !mirrorX)) continue;
 
+    const layerOpacity = layer.opacity !== undefined ? layer.opacity : 1.0;
+    if (layerOpacity <= 0) continue;
+
     ctx.strokeStyle = layer.color;
     ctx.fillStyle = layer.color;
     const isCopper = layer.type === 'SIGNAL';
-    ctx.globalAlpha = isCopper ? 0.96 : 0.95;
+    ctx.globalAlpha = (isCopper ? 0.96 : 0.95) * layerOpacity;
 
     // Copper Surfaces & Ground Pours
     if (layer.surfacePath) {{
@@ -2253,22 +2381,9 @@ function render() {{
       ctx.fill(layer.circlePath);
     }}
 
-    // Rectangular Gold Pads: flat [x, y, w, h, ang, ...]
-    if (layer.rects && layer.rects.length > 0) {{
-      const r = layer.rects;
-      for (let i = 0; i < r.length; i += 5) {{
-        const x = r[i], y = r[i+1], w = r[i+2], h = r[i+3], ang = r[i+4];
-        if (x + w < vMinX || x - w > vMaxX || y + h < vMinY || y - h > vMaxY) continue;
-        if (ang === 0) {{
-          ctx.fillRect(x - w / 2, y - h / 2, w, h);
-        }} else {{
-          ctx.save();
-          ctx.translate(x, y);
-          ctx.rotate(ang * (Math.PI / 180));
-          ctx.fillRect(-w / 2, -h / 2, w, h);
-          ctx.restore();
-        }}
-      }}
+    // Rectangular Gold Pads (Precompiled Path2D for Maximum GPU Speed)
+    if (layer.rectPath) {{
+      ctx.fill(layer.rectPath);
     }}
   }}
   ctx.globalAlpha = 1.0;
@@ -2279,6 +2394,10 @@ function render() {{
   for (const layer of board.layers) {{
     if (!layer.visible || !layer.texts || layer.texts.length === 0) continue;
     if ((layer.side === 'TOP' && mirrorX) || (layer.side === 'BOTTOM' && !mirrorX)) continue;
+    const layerOpacity = layer.opacity !== undefined ? layer.opacity : 1.0;
+    if (layerOpacity <= 0) continue;
+
+    ctx.globalAlpha = layerOpacity;
     ctx.fillStyle = layer.color;
 
     for (const t of layer.texts) {{
@@ -2308,13 +2427,20 @@ function render() {{
 
   // 4. Board Boundary Edge Outline
   if (board.profile && board.profile.visible && board.profile.path) {{
-    ctx.strokeStyle = board.profile.color;
-    ctx.lineWidth = Math.max(0.25, 1.5 / scale);
-    ctx.stroke(board.profile.path);
+    const profOpacity = board.profile.opacity !== undefined ? board.profile.opacity : 1.0;
+    if (profOpacity > 0) {{
+      ctx.globalAlpha = profOpacity;
+      ctx.strokeStyle = board.profile.color;
+      ctx.lineWidth = Math.max(0.25, 1.5 / scale);
+      ctx.stroke(board.profile.path);
+      ctx.globalAlpha = 1.0;
+    }}
   }}
 
   // 5. Precompiled Component Courtyards & Pads (Zero-Overhead GPU Batching)
-  if (compConfig.showPackages) {{
+  const pkgOpacity = compConfig.opacityPkg !== undefined ? compConfig.opacityPkg : 1.0;
+  if (compConfig.showPackages && pkgOpacity > 0) {{
+    ctx.globalAlpha = pkgOpacity;
     const pkgPath = mirrorX ? board.botPkgPath : board.topPkgPath;
     if (pkgPath) {{
       ctx.strokeStyle = compConfig.colorPkg;
@@ -2341,9 +2467,12 @@ function render() {{
         ctx.stroke(pO);
       }}
     }}
+    ctx.globalAlpha = 1.0;
   }}
 
-  if (compConfig.showTestpoints) {{
+  const tpOpacity = compConfig.opacityTP !== undefined ? compConfig.opacityTP : 1.0;
+  if (compConfig.showTestpoints && tpOpacity > 0) {{
+    ctx.globalAlpha = tpOpacity;
     const tpPath = mirrorX ? board.botTpPath : board.topTpPath;
     if (tpPath) {{
       ctx.fillStyle = '#e0f7fa';
@@ -2352,172 +2481,198 @@ function render() {{
       ctx.fill(tpPath);
       ctx.stroke(tpPath);
     }}
+    ctx.globalAlpha = 1.0;
   }}
 
-  // Single Target Selection Highlight
-  if (selectedComp || selectedTP || searchTarget) {{
-    const targetRef = searchTarget || (selectedComp ? selectedComp[0] : (selectedTP ? selectedTP[0] : null));
-    if (targetRef) {{
-      const c = compMap.get(targetRef.toLowerCase());
+  // Multi-Target Selection Highlights for Components & Test Points
+  const targetsToHighlight = new Map();
+  for (const [k, c] of selectedComps.entries()) {{
+    targetsToHighlight.set(k, {{ item: c, isTP: false }});
+  }}
+  for (const [k, tp] of selectedTPs.entries()) {{
+    targetsToHighlight.set(k, {{ item: tp, isTP: true }});
+  }}
+  if (searchTarget) {{
+    const stKey = searchTarget.toLowerCase();
+    if (!targetsToHighlight.has(stKey)) {{
+      const c = compMap.get(stKey);
       if (c) {{
-        const cSide = c[7];
-        const curSideCode = mirrorX ? 1 : 0;
-        if (cSide === curSideCode) {{
-          const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
-          const pxc = c[12] || 0, pyc = c[13] || 0;
-          const isTP = c[10] === 1;
-
-          ctx.save();
-          ctx.translate(cx, cy);
-          if (isTP) {{
-            const r = Math.max(cw, ch, 0.8) / 2.0;
-            ctx.fillStyle = '#ff2222';
-            ctx.beginPath();
-            ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = Math.max(0.22, 1.5 / scale);
-            ctx.stroke();
-          }} else {{
-            ctx.rotate(crot * (Math.PI / 180));
-            ctx.strokeStyle = '#ff2222';
-            ctx.lineWidth = Math.max(0.3, 2.5 / scale);
-            ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
-          }}
-          // Target ring
-          ctx.strokeStyle = '#ff2222';
-          ctx.lineWidth = Math.max(0.3, 2.5 / scale);
-          ctx.beginPath();
-          ctx.arc(pxc, pyc, Math.max(cw, ch) * 0.85, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.restore();
-        }}
+        targetsToHighlight.set(stKey, {{ item: c, isTP: c[10] === 1 }});
       }}
     }}
   }}
 
-  // 6. Selected Trace / Net: Physical Copper Route, Vias & Connected Pins
-  if (selectedNet) {{
+  if (targetsToHighlight.size > 0) {{
     const curSideCode = mirrorX ? 1 : 0;
-    const netPins = selectedNet[1] || [];
-    const traceSegs = selectedNet[3] || [];
-    const netVias = selectedNet[4] || [];
+    for (const entry of targetsToHighlight.values()) {{
+      const c = entry.item;
+      const isTP = entry.isTP;
+      const cSide = c[7];
+      if (cSide !== curSideCode) continue;
 
-    // --- A. Physical Copper Trace Routing ---
-    if (traceSegs.length > 0) {{
-      // 1. Other Side & Inner Layer Copper Routing (subtle dashed context)
+      const cx = c[1], cy = c[2], cw = c[3], ch = c[4], crot = c[5];
+      const pxc = c[12] || 0, pyc = c[13] || 0;
+
       ctx.save();
-      ctx.strokeStyle = 'rgba(255, 230, 0, 0.40)';
-      ctx.lineWidth = Math.max(0.20, 1.6 / scale);
-      ctx.setLineDash([4 / scale, 3 / scale]);
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      for (let i = 0; i < traceSegs.length; i += 5) {{
-        if (traceSegs[i] !== curSideCode) {{
-          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
-          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
-        }}
+      ctx.translate(cx, cy);
+      if (isTP) {{
+        const r = Math.max(cw, ch, 0.8) / 2.0;
+        ctx.fillStyle = '#ff2222';
+        ctx.beginPath();
+        ctx.arc(pxc, pyc, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(0.22, 1.5 / scale);
+        ctx.stroke();
+      }} else {{
+        ctx.rotate(crot * (Math.PI / 180));
+        ctx.strokeStyle = '#ff2222';
+        ctx.lineWidth = Math.max(0.3, 2.5 / scale);
+        ctx.strokeRect(pxc - cw / 2, pyc - ch / 2, cw, ch);
       }}
+      // Target ring
+      ctx.strokeStyle = '#ff2222';
+      ctx.lineWidth = Math.max(0.3, 2.5 / scale);
+      ctx.beginPath();
+      ctx.arc(pxc, pyc, Math.max(cw, ch) * 0.85, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
+    }}
+  }}
 
-      // 2. Current Side Copper Routing (Bright Glowing Highlight)
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+  // 6. Selected Traces / Nets: Multi-Trace Physical Copper Routes, Vias & Connected Pins
+  if (selectedNets.size > 0) {{
+    const curSideCode = mirrorX ? 1 : 0;
+    let netIdx = 0;
 
-      // Outer luminous halo
-      ctx.strokeStyle = '#ffe600';
-      ctx.lineWidth = Math.max(0.60, 3.8 / scale);
-      ctx.beginPath();
-      for (let i = 0; i < traceSegs.length; i += 5) {{
-        if (traceSegs[i] === curSideCode) {{
-          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
-          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+    for (const [netKey, net] of selectedNets.entries()) {{
+      const netColor = TRACE_PALETTE[netIdx % TRACE_PALETTE.length];
+      netIdx++;
+
+      const netPins = net[1] || [];
+      const traceSegs = net[3] || [];
+      const netVias = net[4] || [];
+
+      // --- A. Physical Copper Trace Routing ---
+      if (traceSegs.length > 0) {{
+        // 1. Other Side & Inner Layer Copper Routing (subtle dashed context)
+        ctx.save();
+        ctx.strokeStyle = netColor;
+        ctx.globalAlpha = 0.35;
+        ctx.lineWidth = Math.max(0.20, 1.6 / scale);
+        ctx.setLineDash([4 / scale, 3 / scale]);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        for (let i = 0; i < traceSegs.length; i += 5) {{
+          if (traceSegs[i] !== curSideCode) {{
+            ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+            ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+          }}
         }}
-      }}
-      ctx.stroke();
+        ctx.stroke();
+        ctx.restore();
 
-      // High-contrast bright core
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = Math.max(0.25, 1.8 / scale);
-      ctx.beginPath();
-      for (let i = 0; i < traceSegs.length; i += 5) {{
-        if (traceSegs[i] === curSideCode) {{
-          ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
-          ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+        // 2. Current Side Copper Routing (Bright Glowing Highlight)
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Outer luminous halo
+        ctx.strokeStyle = netColor;
+        ctx.lineWidth = Math.max(0.60, 3.8 / scale);
+        ctx.beginPath();
+        for (let i = 0; i < traceSegs.length; i += 5) {{
+          if (traceSegs[i] === curSideCode) {{
+            ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+            ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+          }}
         }}
+        ctx.stroke();
+
+        // High-contrast bright core
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(0.25, 1.8 / scale);
+        ctx.beginPath();
+        for (let i = 0; i < traceSegs.length; i += 5) {{
+          if (traceSegs[i] === curSideCode) {{
+            ctx.moveTo(traceSegs[i + 1], traceSegs[i + 2]);
+            ctx.lineTo(traceSegs[i + 3], traceSegs[i + 4]);
+          }}
+        }}
+        ctx.stroke();
+        ctx.restore();
+      }} else if (netPins.length > 1) {{
+        // Fallback: If net has no routed copper in CAD data, draw subtle airwire
+        ctx.save();
+        ctx.strokeStyle = netColor;
+        ctx.globalAlpha = 0.50;
+        ctx.lineWidth = Math.max(0.20, 1.2 / scale);
+        ctx.setLineDash([3 / scale, 3 / scale]);
+        ctx.beginPath();
+        let first = true;
+        for (const p of netPins) {{
+          const wx = p[3], wy = p[4];
+          if (first) {{ ctx.moveTo(wx, wy); first = false; }}
+          else {{ ctx.lineTo(wx, wy); }}
+        }}
+        ctx.stroke();
+        ctx.restore();
       }}
-      ctx.stroke();
-      ctx.restore();
-    }} else if (netPins.length > 1) {{
-      // Fallback: If net has no routed copper in CAD data, draw subtle airwire
-      ctx.save();
-      ctx.strokeStyle = 'rgba(255, 230, 0, 0.50)';
-      ctx.lineWidth = Math.max(0.20, 1.2 / scale);
-      ctx.setLineDash([3 / scale, 3 / scale]);
-      ctx.beginPath();
-      let first = true;
+
+      // --- B. Vias on Net ---
+      if (netVias.length > 0) {{
+        ctx.save();
+        for (let i = 0; i < netVias.length; i += 2) {{
+          const vx = netVias[i], vy = netVias[i + 1];
+          // Via copper pad ring
+          ctx.fillStyle = netColor;
+          ctx.beginPath();
+          ctx.arc(vx, vy, Math.max(0.35, 2.5 / scale), 0, Math.PI * 2);
+          ctx.fill();
+
+          // Via drill hole center
+          ctx.fillStyle = '#0d1117';
+          ctx.beginPath();
+          ctx.arc(vx, vy, Math.max(0.18, 1.2 / scale), 0, Math.PI * 2);
+          ctx.fill();
+        }}
+        ctx.restore();
+      }}
+
+      // --- C. Connected Pin Terminals ---
       for (const p of netPins) {{
-        const wx = p[3], wy = p[4];
-        if (first) {{ ctx.moveTo(wx, wy); first = false; }}
-        else {{ ctx.lineTo(wx, wy); }}
-      }}
-      ctx.stroke();
-      ctx.restore();
-    }}
+        const [pside, pref, pname, wx, wy, isTp] = p;
+        const isCurSide = (pside === curSideCode);
 
-    // --- B. Vias on Net ---
-    if (netVias.length > 0) {{
-      ctx.save();
-      for (let i = 0; i < netVias.length; i += 2) {{
-        const vx = netVias[i], vy = netVias[i + 1];
-        // Via copper pad ring
-        ctx.fillStyle = '#ffe600';
+        ctx.save();
+        ctx.translate(wx, wy);
+
+        ctx.strokeStyle = netColor;
+        ctx.fillStyle = netColor;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = Math.max(0.25, 2.0 / scale);
+
+        const r = isTp ? 1.0 : 0.6;
         ctx.beginPath();
-        ctx.arc(vx, vy, Math.max(0.35, 2.5 / scale), 0, Math.PI * 2);
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
         ctx.fill();
+        ctx.globalAlpha = 1.0;
+        ctx.stroke();
 
-        // Via drill hole center
-        ctx.fillStyle = '#0d1117';
-        ctx.beginPath();
-        ctx.arc(vx, vy, Math.max(0.18, 1.2 / scale), 0, Math.PI * 2);
-        ctx.fill();
+        if (isCurSide && scale * 1.5 >= 14) {{
+          ctx.scale(mirrorX ? -1 : 1, -1);
+          const FONT_RES = 64;
+          ctx.scale(1 / FONT_RES, 1 / FONT_RES);
+          ctx.font = `600 ${{Math.round(1.1 * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = netColor;
+          ctx.fillText(`${{pref}}.${{pname}}`, 0, -r * FONT_RES - 2);
+        }}
+
+        ctx.restore();
       }}
-      ctx.restore();
-    }}
-
-    // --- C. Connected Pin Terminals ---
-    for (const p of netPins) {{
-      const [pside, pref, pname, wx, wy, isTp] = p;
-      const isCurSide = (pside === curSideCode);
-
-      ctx.save();
-      ctx.translate(wx, wy);
-
-      ctx.strokeStyle = isTp ? '#00e5ff' : '#ffe600';
-      ctx.fillStyle = isTp ? 'rgba(0, 229, 255, 0.50)' : 'rgba(255, 230, 0, 0.50)';
-      ctx.lineWidth = Math.max(0.25, 2.0 / scale);
-
-      const r = isTp ? 1.0 : 0.6;
-      ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      if (isCurSide && scale * 1.5 >= 14) {{
-        ctx.scale(mirrorX ? -1 : 1, -1);
-        const FONT_RES = 64;
-        ctx.scale(1 / FONT_RES, 1 / FONT_RES);
-        ctx.font = `600 ${{Math.round(1.1 * FONT_RES)}}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        ctx.fillStyle = isTp ? '#00e5ff' : '#ffe600';
-        ctx.fillText(`${{pref}}.${{pname}}`, 0, -r * FONT_RES - 2);
-      }}
-
-      ctx.restore();
     }}
   }}
 
@@ -2546,7 +2701,7 @@ function render() {{
       const pxc = cmp[12] || 0;
       const pyc = cmp[13] || 0;
       const bodyAxis = cmp[14] !== undefined ? cmp[14] : (cw >= ch ? 0 : 1);
-      const isTarget = searchTarget && ref.toLowerCase() === searchTarget.toLowerCase();
+      const isTarget = targetsToHighlight.has(ref.toLowerCase());
 
       if (isTP && !compConfig.showTestpoints && !isTarget) continue;
       if (!isTP && !compConfig.showPackages && !isTarget) continue;
@@ -2703,10 +2858,15 @@ function buildLayerList() {{
   if (board.profile) {{
     const row = document.createElement('div');
     row.className = 'layer-row';
+    const profOpacity = Math.round((board.profile.opacity !== undefined ? board.profile.opacity : 1.0) * 100);
     row.innerHTML = `
       <input type="checkbox" id="chk-prof" ${{board.profile.visible ? 'checked' : ''}}>
       <input type="color" id="col-prof" value="${{board.profile.color}}">
       <span class="layer-label">Board Outline</span>
+      <div class="layer-op-ctrl" title="Outline Opacity">
+        <input type="range" class="layer-opacity-slider" id="op-prof" min="0" max="100" value="${{profOpacity}}">
+        <span class="layer-opacity-val" id="val-prof">${{profOpacity}}%</span>
+      </div>
       <span class="layer-count">${{board.profile.loops ? board.profile.loops.length : 1}}</span>
     `;
     row.querySelector('#chk-prof').addEventListener('change', e => {{
@@ -2715,6 +2875,11 @@ function buildLayerList() {{
     }});
     row.querySelector('#col-prof').addEventListener('input', e => {{
       board.profile.color = e.target.value;
+      scheduleRender();
+    }});
+    row.querySelector('#op-prof').addEventListener('input', e => {{
+      board.profile.opacity = parseInt(e.target.value, 10) / 100.0;
+      row.querySelector('#val-prof').textContent = `${{e.target.value}}%`;
       scheduleRender();
     }});
     list.appendChild(row);
@@ -2727,10 +2892,15 @@ function buildLayerList() {{
 
   const pkgRow = document.createElement('div');
   pkgRow.className = 'layer-row';
+  const pkgOpacity = Math.round((compConfig.opacityPkg !== undefined ? compConfig.opacityPkg : 1.0) * 100);
   pkgRow.innerHTML = `
     <input type="checkbox" id="chk-pkg" ${{compConfig.showPackages ? 'checked' : ''}}>
     <input type="color" id="col-pkg" value="${{compConfig.colorPkg}}">
     <span class="layer-label">SMD Packages & Pins</span>
+    <div class="layer-op-ctrl" title="Package Opacity">
+      <input type="range" class="layer-opacity-slider" id="op-pkg" min="0" max="100" value="${{pkgOpacity}}">
+      <span class="layer-opacity-val" id="val-pkg">${{pkgOpacity}}%</span>
+    </div>
     <span class="layer-count">${{board.components?.length || 0}}</span>
   `;
   pkgRow.querySelector('#chk-pkg').addEventListener('change', e => {{
@@ -2741,14 +2911,24 @@ function buildLayerList() {{
     compConfig.colorPkg = e.target.value;
     scheduleRender();
   }});
+  pkgRow.querySelector('#op-pkg').addEventListener('input', e => {{
+    compConfig.opacityPkg = parseInt(e.target.value, 10) / 100.0;
+    pkgRow.querySelector('#val-pkg').textContent = `${{e.target.value}}%`;
+    scheduleRender();
+  }});
   list.appendChild(pkgRow);
 
   const tpRow = document.createElement('div');
   tpRow.className = 'layer-row';
+  const tpOpacity = Math.round((compConfig.opacityTP !== undefined ? compConfig.opacityTP : 1.0) * 100);
   tpRow.innerHTML = `
     <input type="checkbox" id="chk-tp" ${{compConfig.showTestpoints ? 'checked' : ''}}>
     <input type="color" id="col-tp" value="${{compConfig.colorTP}}">
     <span class="layer-label">Test Points (TP...)</span>
+    <div class="layer-op-ctrl" title="Test Point Opacity">
+      <input type="range" class="layer-opacity-slider" id="op-tp" min="0" max="100" value="${{tpOpacity}}">
+      <span class="layer-opacity-val" id="val-tp">${{tpOpacity}}%</span>
+    </div>
   `;
   tpRow.querySelector('#chk-tp').addEventListener('change', e => {{
     compConfig.showTestpoints = e.target.checked;
@@ -2756,6 +2936,11 @@ function buildLayerList() {{
   }});
   tpRow.querySelector('#col-tp').addEventListener('input', e => {{
     compConfig.colorTP = e.target.value;
+    scheduleRender();
+  }});
+  tpRow.querySelector('#op-tp').addEventListener('input', e => {{
+    compConfig.opacityTP = parseInt(e.target.value, 10) / 100.0;
+    tpRow.querySelector('#val-tp').textContent = `${{e.target.value}}%`;
     scheduleRender();
   }});
   list.appendChild(tpRow);
@@ -2769,11 +2954,16 @@ function buildLayerList() {{
     const row = document.createElement('div');
     row.className = 'layer-row';
     const sideClass = layer.side === 'TOP' ? 'badge-top' : (layer.side === 'BOTTOM' ? 'badge-bot' : 'badge-inner');
+    const layOpacity = Math.round((layer.opacity !== undefined ? layer.opacity : 1.0) * 100);
     row.innerHTML = `
       <input type="checkbox" id="chk-${{idx}}" ${{layer.visible ? 'checked' : ''}}>
       <input type="color" id="col-${{idx}}" value="${{layer.color}}">
       <span class="layer-side-badge ${{sideClass}}">${{layer.side}}</span>
       <span class="layer-label" title="${{layer.name}}">${{layer.label || layer.name}}</span>
+      <div class="layer-op-ctrl" title="Layer Opacity">
+        <input type="range" class="layer-opacity-slider" id="op-${{idx}}" min="0" max="100" value="${{layOpacity}}">
+        <span class="layer-opacity-val" id="val-${{idx}}">${{layOpacity}}%</span>
+      </div>
       <span class="layer-count">${{layer.itemCount || 0}}</span>
     `;
     row.querySelector(`#chk-${{idx}}`).addEventListener('change', e => {{
@@ -2782,6 +2972,11 @@ function buildLayerList() {{
     }});
     row.querySelector(`#col-${{idx}}`).addEventListener('input', e => {{
       layer.color = e.target.value;
+      scheduleRender();
+    }});
+    row.querySelector(`#op-${{idx}}`).addEventListener('input', e => {{
+      layer.opacity = parseInt(e.target.value, 10) / 100.0;
+      row.querySelector(`#val-${{idx}}`).textContent = `${{e.target.value}}%`;
       scheduleRender();
     }});
     list.appendChild(row);
@@ -2863,6 +3058,23 @@ function filterComponents() {{
   }});
 }}
 
+function clearAllSelection() {{
+  selectedComps.clear();
+  selectedTPs.clear();
+  selectedNets.clear();
+  selectedComp = null;
+  selectedTP = null;
+  selectedNet = null;
+  searchTarget = null;
+  document.getElementById('inspector-comp').style.display = 'none';
+  document.getElementById('inspector-tp').style.display = 'none';
+  document.getElementById('inspector-trace').style.display = 'none';
+  renderCompList();
+  renderTPList();
+  renderTraceList();
+  scheduleRender();
+}}
+
 function renderCompList() {{
   const container = document.getElementById('list-comps');
   const counter = document.getElementById('counter-comps');
@@ -2875,7 +3087,7 @@ function renderCompList() {{
   const slice = items.slice(0, showing);
   for (const c of slice) {{
     const ref = c[0];
-    const isSel = selectedComp && selectedComp[0] === ref;
+    const isSel = selectedComps.has(ref.toLowerCase());
     const side = c[7] === 0 ? 'TOP' : 'BOT';
     const sideClass = c[7] === 0 ? 'badge-top' : 'badge-bot';
     const part = c[8] || (c[11] === 1 ? 'IC Package' : 'SMD');
@@ -2893,10 +3105,16 @@ function renderCompList() {{
         ${{pinCount > 0 ? `<span class="item-badge badge-pins">${{pinCount}}P</span>` : ''}}
       </div>
     `;
-    if (isSel) {{
+    if (isSel && selectedComps.size === 1) {{
       setTimeout(() => row.scrollIntoView({{ block: 'nearest' }}), 0);
     }}
-    row.addEventListener('click', () => selectComponent(c));
+    row.addEventListener('click', (e) => {{
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+        toggleComponent(c);
+      }} else {{
+        selectComponent(c);
+      }}
+    }});
     container.appendChild(row);
   }}
 
@@ -2912,15 +3130,7 @@ function renderCompList() {{
   }}
 }}
 
-function selectComponent(c, autoPan = true) {{
-  selectedComp = c;
-  selectedTP = null;
-  searchTarget = c[0];
-  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
-  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
-    setViewSide(side);
-  }}
-
+function panToComponent(c) {{
   const pxc = c[12] || 0;
   const pyc = c[13] || 0;
   const crot = c[5];
@@ -2930,51 +3140,164 @@ function selectComponent(c, autoPan = true) {{
   const cw = c[3];
   const ch = c[4];
 
-  if (autoPan) {{
-    const fitScale = Math.min((canvas.width * 0.35) / Math.max(cw, 2.0), (canvas.height * 0.35) / Math.max(ch, 2.0));
-    scale = Math.max(scale, Math.min(fitScale, 20.0 * window.devicePixelRatio));
-    panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
-    panY = canvas.height / 2 + cy * scale;
+  const fitScale = Math.min((canvas.width * 0.35) / Math.max(cw, 2.0), (canvas.height * 0.35) / Math.max(ch, 2.0));
+  scale = Math.max(scale, Math.min(fitScale, 20.0 * window.devicePixelRatio));
+  panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
+  panY = canvas.height / 2 + cy * scale;
+}}
+
+function selectComponent(c, autoPan = true) {{
+  selectedComps.clear();
+  selectedTPs.clear();
+  selectedNets.clear();
+  selectedComps.set(c[0].toLowerCase(), c);
+  selectedComp = c;
+  selectedTP = null;
+  selectedNet = null;
+  searchTarget = c[0];
+
+  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+    setViewSide(side);
   }}
+  if (autoPan) panToComponent(c);
 
-  const insp = document.getElementById('inspector-comp');
-  insp.style.display = 'flex';
-  const nets = compNetMap.get(c[0].toUpperCase()) || [];
-  insp.innerHTML = `
-    <div class="inspector-header">
-      <h3>${{c[0]}}</h3>
-      <button class="inspector-btn-close" id="close-comp-insp">✕</button>
-    </div>
-    <div class="inspector-detail">
-      <strong>Side:</strong> ${{side}} | <strong>Pos:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
-      <strong>Size:</strong> ${{cw.toFixed(2)}} × ${{ch.toFixed(2)}} mm | <strong>Pins:</strong> ${{c[9] ? c[9].length : 0}}<br>
-      ${{c[8] ? `<strong>Part:</strong> ${{c[8]}}<br>` : ''}}
-    </div>
-    ${{nets.length > 0 ? `
-      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACES:</div>
-      <div class="inspector-chips">
-        ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">${{n}}</span>`).join('')}}
-      </div>
-    ` : ''}}
-  `;
-  insp.querySelector('#close-comp-insp').addEventListener('click', () => {{
-    insp.style.display = 'none';
-    selectedComp = null;
-    searchTarget = null;
-    scheduleRender();
-  }});
-  insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
-    chip.addEventListener('click', () => {{
-      const netObj = netMap.get(chip.dataset.net.toLowerCase());
-      if (netObj) {{
-        switchTab('tab-traces');
-        selectTrace(netObj);
-      }}
-    }});
-  }});
+  updateCompInspector();
+  renderCompList();
+  renderTPList();
+  renderTraceList();
+  scheduleRender();
+}}
 
+function toggleComponent(c, autoPan = false) {{
+  const key = c[0].toLowerCase();
+  if (selectedComps.has(key)) {{
+    selectedComps.delete(key);
+  }} else {{
+    selectedComps.set(key, c);
+    searchTarget = c[0];
+    const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+    if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+      setViewSide(side);
+    }}
+    if (autoPan) panToComponent(c);
+  }}
+  selectedComp = selectedComps.size > 0 ? selectedComps.values().next().value : null;
+
+  updateCompInspector();
   renderCompList();
   scheduleRender();
+}}
+
+function updateCompInspector() {{
+  const insp = document.getElementById('inspector-comp');
+  if (selectedComps.size === 0) {{
+    insp.style.display = 'none';
+    return;
+  }}
+  insp.style.display = 'flex';
+
+  if (selectedComps.size === 1) {{
+    const c = selectedComps.values().next().value;
+    const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+    const cw = c[3];
+    const ch = c[4];
+    const nets = compNetMap.get(c[0].toUpperCase()) || [];
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3>${{c[0]}}</h3>
+        <button class="inspector-btn-close" id="close-comp-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Side:</strong> ${{side}} | <strong>Pos:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
+        <strong>Size:</strong> ${{cw.toFixed(2)}} × ${{ch.toFixed(2)}} mm | <strong>Pins:</strong> ${{c[9] ? c[9].length : 0}}<br>
+        ${{c[8] ? `<strong>Part:</strong> ${{c[8]}}<br>` : ''}}
+      </div>
+      ${{nets.length > 0 ? `
+        <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACES:</div>
+        <div class="inspector-chips">
+          ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">${{n}}</span>`).join('')}}
+        </div>
+      ` : ''}}
+    `;
+    insp.querySelector('#close-comp-insp').addEventListener('click', () => {{
+      selectedComps.clear();
+      selectedComp = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderCompList();
+      scheduleRender();
+    }});
+    insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        const netObj = netMap.get(chip.dataset.net.toLowerCase());
+        if (netObj) {{
+          switchTab('tab-traces');
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+            toggleTrace(netObj);
+          }} else {{
+            selectTrace(netObj);
+          }}
+        }}
+      }});
+    }});
+  }} else {{
+    const compArray = Array.from(selectedComps.values());
+    const totalPins = compArray.reduce((acc, c) => acc + (c[9] ? c[9].length : 0), 0);
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3>Components (${{compArray.length}} Selected)</h3>
+        <button class="inspector-btn-close" id="close-comp-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Total Selected:</strong> ${{compArray.length}} | <strong>Total Pins:</strong> ${{totalPins}}
+      </div>
+      <div class="inspector-chips">
+        ${{compArray.map(c => `
+          <span class="node-chip" data-ref="${{c[0]}}">
+            ${{c[0]}} <span class="chip-rm" data-rm="${{c[0]}}" title="Remove">×</span>
+          </span>
+        `).join('')}}
+      </div>
+      <button class="btn-clear-multi" id="btn-clear-comps">✕ Deselect All</button>
+    `;
+    insp.querySelector('#close-comp-insp').addEventListener('click', () => {{
+      selectedComps.clear();
+      selectedComp = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderCompList();
+      scheduleRender();
+    }});
+    insp.querySelector('#btn-clear-comps').addEventListener('click', () => {{
+      selectedComps.clear();
+      selectedComp = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderCompList();
+      scheduleRender();
+    }});
+    insp.querySelectorAll('.chip-rm').forEach(rm => {{
+      rm.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        selectedComps.delete(rm.dataset.rm.toLowerCase());
+        selectedComp = selectedComps.size > 0 ? selectedComps.values().next().value : null;
+        updateCompInspector();
+        renderCompList();
+        scheduleRender();
+      }});
+    }});
+    insp.querySelectorAll('.node-chip').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        if (e.target.classList.contains('chip-rm')) return;
+        const c = compMap.get(chip.dataset.ref.toLowerCase());
+        if (c) {{
+          panToComponent(c);
+          scheduleRender();
+        }}
+      }});
+    }});
+  }}
 }}
 
 // -------------------------------------------------------------
@@ -3011,7 +3334,7 @@ function renderTPList() {{
   const slice = items.slice(0, showing);
   for (const c of slice) {{
     const ref = c[0];
-    const isSel = selectedTP && selectedTP[0] === ref;
+    const isSel = selectedTPs.has(ref.toLowerCase());
     const side = c[7] === 0 ? 'TOP' : 'BOT';
     const sideClass = c[7] === 0 ? 'badge-top' : 'badge-bot';
     const nets = compNetMap.get(ref.toUpperCase()) || [];
@@ -3029,10 +3352,16 @@ function renderTPList() {{
         ${{netName ? `<span class="item-badge badge-net" title="Net: ${{netName}}">${{netName}}</span>` : ''}}
       </div>
     `;
-    if (isSel) {{
+    if (isSel && selectedTPs.size === 1) {{
       setTimeout(() => row.scrollIntoView({{ block: 'nearest' }}), 0);
     }}
-    row.addEventListener('click', () => selectTestPoint(c));
+    row.addEventListener('click', (e) => {{
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+        toggleTestPoint(c);
+      }} else {{
+        selectTestPoint(c);
+      }}
+    }});
     container.appendChild(row);
   }}
 
@@ -3048,63 +3377,164 @@ function renderTPList() {{
   }}
 }}
 
-function selectTestPoint(c, autoPan = true) {{
-  selectedTP = c;
-  selectedComp = null;
-  searchTarget = c[0];
-  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
-  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
-    setViewSide(side);
-  }}
-
+function panToTP(c) {{
   const pxc = c[12] || 0;
   const pyc = c[13] || 0;
   const cx = c[1] + pxc;
   const cy = c[2] + pyc;
+  scale = Math.max(scale, 16.0 * window.devicePixelRatio);
+  panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
+  panY = canvas.height / 2 + cy * scale;
+}}
 
-  if (autoPan) {{
-    scale = Math.max(scale, 16.0 * window.devicePixelRatio);
-    panX = canvas.width / 2 - (mirrorX ? -cx : cx) * scale;
-    panY = canvas.height / 2 + cy * scale;
+function selectTestPoint(c, autoPan = true) {{
+  selectedComps.clear();
+  selectedTPs.clear();
+  selectedNets.clear();
+  selectedTPs.set(c[0].toLowerCase(), c);
+  selectedTP = c;
+  selectedComp = null;
+  selectedNet = null;
+  searchTarget = c[0];
+
+  const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+  if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+    setViewSide(side);
   }}
+  if (autoPan) panToTP(c);
 
-  const insp = document.getElementById('inspector-tp');
-  insp.style.display = 'flex';
-  const nets = compNetMap.get(c[0].toUpperCase()) || [];
-  insp.innerHTML = `
-    <div class="inspector-header">
-      <h3 style="color:#00e5ff">${{c[0]}}</h3>
-      <button class="inspector-btn-close" id="close-tp-insp">✕</button>
-    </div>
-    <div class="inspector-detail">
-      <strong>Side:</strong> ${{side}} | <strong>Position:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
-      <strong>Type:</strong> Test Point (SMD Pad)
-    </div>
-    ${{nets.length > 0 ? `
-      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACE:</div>
-      <div class="inspector-chips">
-        ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">🔍 ${{n}}</span>`).join('')}}
-      </div>
-    ` : ''}}
-  `;
-  insp.querySelector('#close-tp-insp').addEventListener('click', () => {{
-    insp.style.display = 'none';
-    selectedTP = null;
-    searchTarget = null;
-    scheduleRender();
-  }});
-  insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
-    chip.addEventListener('click', () => {{
-      const netObj = netMap.get(chip.dataset.net.toLowerCase());
-      if (netObj) {{
-        switchTab('tab-traces');
-        selectTrace(netObj);
-      }}
-    }});
-  }});
+  updateTPInspector();
+  renderCompList();
+  renderTPList();
+  renderTraceList();
+  scheduleRender();
+}}
 
+function toggleTestPoint(c, autoPan = false) {{
+  const key = c[0].toLowerCase();
+  if (selectedTPs.has(key)) {{
+    selectedTPs.delete(key);
+  }} else {{
+    selectedTPs.set(key, c);
+    searchTarget = c[0];
+    const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+    if ((side === 'TOP' && mirrorX) || (side === 'BOTTOM' && !mirrorX)) {{
+      setViewSide(side);
+    }}
+    if (autoPan) panToTP(c);
+  }}
+  selectedTP = selectedTPs.size > 0 ? selectedTPs.values().next().value : null;
+
+  updateTPInspector();
   renderTPList();
   scheduleRender();
+}}
+
+function updateTPInspector() {{
+  const insp = document.getElementById('inspector-tp');
+  if (selectedTPs.size === 0) {{
+    insp.style.display = 'none';
+    return;
+  }}
+  insp.style.display = 'flex';
+
+  if (selectedTPs.size === 1) {{
+    const c = selectedTPs.values().next().value;
+    const side = c[7] === 0 ? 'TOP' : 'BOTTOM';
+    const nets = compNetMap.get(c[0].toUpperCase()) || [];
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3 style="color:#00e5ff">${{c[0]}}</h3>
+        <button class="inspector-btn-close" id="close-tp-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Side:</strong> ${{side}} | <strong>Position:</strong> (${{c[1].toFixed(2)}}, ${{c[2].toFixed(2)}}) mm<br>
+        <strong>Type:</strong> Test Point (SMD Pad)
+      </div>
+      ${{nets.length > 0 ? `
+        <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED TRACE:</div>
+        <div class="inspector-chips">
+          ${{nets.map(n => `<span class="node-chip trace" data-net="${{n}}">🔍 ${{n}}</span>`).join('')}}
+        </div>
+      ` : ''}}
+    `;
+    insp.querySelector('#close-tp-insp').addEventListener('click', () => {{
+      selectedTPs.clear();
+      selectedTP = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTPList();
+      scheduleRender();
+    }});
+    insp.querySelectorAll('.node-chip.trace').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        const netObj = netMap.get(chip.dataset.net.toLowerCase());
+        if (netObj) {{
+          switchTab('tab-traces');
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+            toggleTrace(netObj);
+          }} else {{
+            selectTrace(netObj);
+          }}
+        }}
+      }});
+    }});
+  }} else {{
+    const tpArray = Array.from(selectedTPs.values());
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3 style="color:#00e5ff">Test Points (${{tpArray.length}} Selected)</h3>
+        <button class="inspector-btn-close" id="close-tp-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Selected TPs:</strong> ${{tpArray.length}}
+      </div>
+      <div class="inspector-chips">
+        ${{tpArray.map(c => `
+          <span class="node-chip tp" data-ref="${{c[0]}}">
+            🎯 ${{c[0]}} <span class="chip-rm" data-rm="${{c[0]}}" title="Remove">×</span>
+          </span>
+        `).join('')}}
+      </div>
+      <button class="btn-clear-multi" id="btn-clear-tps">✕ Deselect All</button>
+    `;
+    insp.querySelector('#close-tp-insp').addEventListener('click', () => {{
+      selectedTPs.clear();
+      selectedTP = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTPList();
+      scheduleRender();
+    }});
+    insp.querySelector('#btn-clear-tps').addEventListener('click', () => {{
+      selectedTPs.clear();
+      selectedTP = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTPList();
+      scheduleRender();
+    }});
+    insp.querySelectorAll('.chip-rm').forEach(rm => {{
+      rm.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        selectedTPs.delete(rm.dataset.rm.toLowerCase());
+        selectedTP = selectedTPs.size > 0 ? selectedTPs.values().next().value : null;
+        updateTPInspector();
+        renderTPList();
+        scheduleRender();
+      }});
+    }});
+    insp.querySelectorAll('.node-chip.tp').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        if (e.target.classList.contains('chip-rm')) return;
+        const c = tpMap.get(chip.dataset.ref.toLowerCase());
+        if (c) {{
+          panToTP(c);
+          scheduleRender();
+        }}
+      }});
+    }});
+  }}
 }}
 
 // -------------------------------------------------------------
@@ -3139,7 +3569,7 @@ function renderTraceList() {{
   const slice = items.slice(0, showing);
   for (const n of slice) {{
     const name = n[0];
-    const isSel = selectedNet && selectedNet[0] === name;
+    const isSel = selectedNets.has(name.toLowerCase());
     const pins = n[1];
     const pinCount = pins.length;
     const tpCount = pins.filter(p => p[5] === 1).length;
@@ -3147,12 +3577,18 @@ function renderTraceList() {{
     const hasBot = pins.some(p => p[0] === 1);
     const sideLabel = (hasTop && hasBot) ? 'BOTH' : (hasTop ? 'TOP' : 'BOT');
     const sideClass = (hasTop && hasBot) ? 'badge-inner' : (hasTop ? 'badge-top' : 'badge-bot');
+    const netColor = isSel ? getNetColor(name) : '#e5c07b';
 
     const row = document.createElement('div');
     row.className = `list-item ${{isSel ? 'selected-trace' : ''}}`;
+    if (isSel) {{
+      row.style.borderLeft = `3px solid ${{netColor}}`;
+    }}
     row.innerHTML = `
       <div class="item-row">
-        <span class="item-title trace">${{name}}</span>
+        <span class="item-title trace" style="${{isSel ? `color:${{netColor}}` : ''}}">
+          ${{isSel ? `<span class="trace-color-dot" style="background:${{netColor}}"></span>` : ''}}${{name}}
+        </span>
         <span class="layer-side-badge ${{sideClass}}">${{sideLabel}}</span>
       </div>
       <div class="item-desc">
@@ -3160,7 +3596,13 @@ function renderTraceList() {{
         ${{tpCount > 0 ? `<span class="item-badge badge-tp-count">${{tpCount}} TP</span>` : ''}}
       </div>
     `;
-    row.addEventListener('click', () => selectTrace(n));
+    row.addEventListener('click', (e) => {{
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+        toggleTrace(n);
+      }} else {{
+        selectTrace(n);
+      }}
+    }});
     container.appendChild(row);
   }}
 
@@ -3176,18 +3618,34 @@ function renderTraceList() {{
   }}
 }}
 
+function panToTrace(net) {{
+  const bbox = net[2];
+  if (!bbox) return;
+  const [minX, minY, maxX, maxY] = bbox;
+  const bW = Math.max(maxX - minX, 10.0);
+  const bH = Math.max(maxY - minY, 10.0);
+  const pad = 64 * window.devicePixelRatio;
+  scale = Math.min((canvas.width - pad * 2) / bW, (canvas.height - pad * 2) / bH);
+  scale = Math.min(Math.max(scale, 2.0 * window.devicePixelRatio), 24.0 * window.devicePixelRatio);
+
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  panX = canvas.width / 2 - (mirrorX ? -midX : midX) * scale;
+  panY = canvas.height / 2 + midY * scale;
+}}
+
 function selectTrace(net, autoPan = true) {{
+  selectedComps.clear();
+  selectedTPs.clear();
+  selectedNets.clear();
+  selectedNets.set(net[0].toLowerCase(), net);
   selectedNet = net;
   selectedComp = null;
   selectedTP = null;
   searchTarget = net[0];
 
-  const name = net[0];
   const pins = net[1] || [];
-  const bbox = net[2];
   const traceSegs = net[3] || [];
-  const netVias = net[4] || [];
-
   let topCount = pins.filter(p => p[0] === 0).length;
   let botCount = pins.filter(p => p[0] === 1).length;
   for (let i = 0; i < traceSegs.length; i += 5) {{
@@ -3201,79 +3659,179 @@ function selectTrace(net, autoPan = true) {{
     setViewSide('BOTTOM');
   }}
 
-  if (autoPan && bbox) {{
-    const [minX, minY, maxX, maxY] = bbox;
-    const bW = Math.max(maxX - minX, 10.0);
-    const bH = Math.max(maxY - minY, 10.0);
-    const pad = 64 * window.devicePixelRatio;
-    scale = Math.min((canvas.width - pad * 2) / bW, (canvas.height - pad * 2) / bH);
-    scale = Math.min(Math.max(scale, 2.0 * window.devicePixelRatio), 24.0 * window.devicePixelRatio);
+  if (autoPan) panToTrace(net);
 
-    const midX = (minX + maxX) / 2;
-    const midY = (minY + maxY) / 2;
-    panX = canvas.width / 2 - (mirrorX ? -midX : midX) * scale;
-    panY = canvas.height / 2 + midY * scale;
-  }}
-
-  const insp = document.getElementById('inspector-trace');
-  insp.style.display = 'flex';
-  const tps = pins.filter(p => p[5] === 1);
-  const comps = pins.filter(p => p[5] === 0);
-  const segCount = Math.floor(traceSegs.length / 5);
-  const viaCount = Math.floor(netVias.length / 2);
-
-  insp.innerHTML = `
-    <div class="inspector-header">
-      <h3 style="color:#e5c07b">${{name}}</h3>
-      <button class="inspector-btn-close" id="close-trace-insp">✕</button>
-    </div>
-    <div class="inspector-detail">
-      <strong>Total Nodes:</strong> ${{pins.length}} (${{comps.length}} Component Pins, ${{tps.length}} Test Points)<br>
-      <strong>Physical Route:</strong> ${{segCount}} Copper Segments${{viaCount > 0 ? ` | ${{viaCount}} Vias` : ''}}
-    </div>
-    ${{tps.length > 0 ? `
-      <div style="font-size:10px; color:#00e5ff; margin-top:2px;">TEST POINTS ON TRACE:</div>
-      <div class="inspector-chips">
-        ${{tps.map(p => `<span class="node-chip tp" data-ref="${{p[1]}}">🎯 ${{p[1]}}</span>`).join('')}}
-      </div>
-    ` : ''}}
-    ${{comps.length > 0 ? `
-      <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED COMPONENT PINS:</div>
-      <div class="inspector-chips">
-        ${{comps.map(p => `<span class="node-chip" data-ref="${{p[1]}}">${{p[1]}}.${{p[2]}}</span>`).join('')}}
-      </div>
-    ` : ''}}
-  `;
-
-  insp.querySelector('#close-trace-insp').addEventListener('click', () => {{
-    insp.style.display = 'none';
-    selectedNet = null;
-    searchTarget = null;
-    scheduleRender();
-  }});
-
-  insp.querySelectorAll('.node-chip.tp').forEach(chip => {{
-    chip.addEventListener('click', () => {{
-      const tpObj = tpMap.get(chip.dataset.ref.toLowerCase());
-      if (tpObj) {{
-        switchTab('tab-tps');
-        selectTestPoint(tpObj);
-      }}
-    }});
-  }});
-
-  insp.querySelectorAll('.node-chip:not(.tp)').forEach(chip => {{
-    chip.addEventListener('click', () => {{
-      const cmpObj = compMap.get(chip.dataset.ref.toLowerCase());
-      if (cmpObj) {{
-        switchTab('tab-comps');
-        selectComponent(cmpObj);
-      }}
-    }});
-  }});
-
+  updateTraceInspector();
+  renderCompList();
+  renderTPList();
   renderTraceList();
   scheduleRender();
+}}
+
+function toggleTrace(net, autoPan = false) {{
+  const key = net[0].toLowerCase();
+  if (selectedNets.has(key)) {{
+    selectedNets.delete(key);
+  }} else {{
+    selectedNets.set(key, net);
+    searchTarget = net[0];
+    if (autoPan) panToTrace(net);
+  }}
+  selectedNet = selectedNets.size > 0 ? selectedNets.values().next().value : null;
+
+  updateTraceInspector();
+  renderTraceList();
+  scheduleRender();
+}}
+
+function updateTraceInspector() {{
+  const insp = document.getElementById('inspector-trace');
+  if (selectedNets.size === 0) {{
+    insp.style.display = 'none';
+    return;
+  }}
+  insp.style.display = 'flex';
+
+  if (selectedNets.size === 1) {{
+    const net = selectedNets.values().next().value;
+    const name = net[0];
+    const pins = net[1] || [];
+    const traceSegs = net[3] || [];
+    const netVias = net[4] || [];
+    const tps = pins.filter(p => p[5] === 1);
+    const comps = pins.filter(p => p[5] === 0);
+    const segCount = Math.floor(traceSegs.length / 5);
+    const viaCount = Math.floor(netVias.length / 2);
+    const netColor = getNetColor(name);
+
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3 style="color:${{netColor}}"><span class="trace-color-dot" style="background:${{netColor}}"></span>${{name}}</h3>
+        <button class="inspector-btn-close" id="close-trace-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Total Nodes:</strong> ${{pins.length}} (${{comps.length}} Component Pins, ${{tps.length}} Test Points)<br>
+        <strong>Physical Route:</strong> ${{segCount}} Copper Segments${{viaCount > 0 ? ` | ${{viaCount}} Vias` : ''}}
+      </div>
+      ${{tps.length > 0 ? `
+        <div style="font-size:10px; color:#00e5ff; margin-top:2px;">TEST POINTS ON TRACE:</div>
+        <div class="inspector-chips">
+          ${{tps.map(p => `<span class="node-chip tp" data-ref="${{p[1]}}">🎯 ${{p[1]}}</span>`).join('')}}
+        </div>
+      ` : ''}}
+      ${{comps.length > 0 ? `
+        <div style="font-size:10px; color:#5c6370; margin-top:2px;">CONNECTED COMPONENT PINS:</div>
+        <div class="inspector-chips">
+          ${{comps.map(p => `<span class="node-chip" data-ref="${{p[1]}}">${{p[1]}}.${{p[2]}}</span>`).join('')}}
+        </div>
+      ` : ''}}
+    `;
+
+    insp.querySelector('#close-trace-insp').addEventListener('click', () => {{
+      selectedNets.clear();
+      selectedNet = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTraceList();
+      scheduleRender();
+    }});
+
+    insp.querySelectorAll('.node-chip.tp').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        const tpObj = tpMap.get(chip.dataset.ref.toLowerCase());
+        if (tpObj) {{
+          switchTab('tab-tps');
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+            toggleTestPoint(tpObj);
+          }} else {{
+            selectTestPoint(tpObj);
+          }}
+        }}
+      }});
+    }});
+
+    insp.querySelectorAll('.node-chip:not(.tp)').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        const cmpObj = compMap.get(chip.dataset.ref.toLowerCase());
+        if (cmpObj) {{
+          switchTab('tab-comps');
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {{
+            toggleComponent(cmpObj);
+          }} else {{
+            selectComponent(cmpObj);
+          }}
+        }}
+      }});
+    }});
+  }} else {{
+    const netArray = Array.from(selectedNets.values());
+    const totalNodes = netArray.reduce((acc, n) => acc + (n[1] ? n[1].length : 0), 0);
+    const totalSegs = netArray.reduce((acc, n) => acc + (n[3] ? Math.floor(n[3].length / 5) : 0), 0);
+    const totalVias = netArray.reduce((acc, n) => acc + (n[4] ? Math.floor(n[4].length / 2) : 0), 0);
+
+    insp.innerHTML = `
+      <div class="inspector-header">
+        <h3 style="color:#e5c07b">Traces (${{netArray.length}} Selected)</h3>
+        <button class="inspector-btn-close" id="close-trace-insp">✕</button>
+      </div>
+      <div class="inspector-detail">
+        <strong>Total Traces:</strong> ${{netArray.length}} | <strong>Nodes:</strong> ${{totalNodes}}<br>
+        <strong>Total Copper:</strong> ${{totalSegs}} Segments${{totalVias > 0 ? ` | ${{totalVias}} Vias` : ''}}
+      </div>
+      <div class="inspector-chips">
+        ${{netArray.map(n => {{
+          const col = getNetColor(n[0]);
+          return `
+            <span class="node-chip" style="border-left:3px solid ${{col}};" data-net="${{n[0]}}">
+              <span class="trace-color-dot" style="background:${{col}}"></span>${{n[0]}}
+              <span class="chip-rm" data-rm="${{n[0]}}" title="Remove">×</span>
+            </span>
+          `;
+        }}).join('')}}
+      </div>
+      <button class="btn-clear-multi" id="btn-clear-traces">✕ Deselect All</button>
+    `;
+
+    insp.querySelector('#close-trace-insp').addEventListener('click', () => {{
+      selectedNets.clear();
+      selectedNet = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTraceList();
+      scheduleRender();
+    }});
+
+    insp.querySelector('#btn-clear-traces').addEventListener('click', () => {{
+      selectedNets.clear();
+      selectedNet = null;
+      searchTarget = null;
+      insp.style.display = 'none';
+      renderTraceList();
+      scheduleRender();
+    }});
+
+    insp.querySelectorAll('.chip-rm').forEach(rm => {{
+      rm.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        selectedNets.delete(rm.dataset.rm.toLowerCase());
+        selectedNet = selectedNets.size > 0 ? selectedNets.values().next().value : null;
+        updateTraceInspector();
+        renderTraceList();
+        scheduleRender();
+      }});
+    }});
+
+    insp.querySelectorAll('.node-chip').forEach(chip => {{
+      chip.addEventListener('click', (e) => {{
+        if (e.target.classList.contains('chip-rm')) return;
+        const n = netMap.get(chip.dataset.net.toLowerCase());
+        if (n) {{
+          panToTrace(n);
+          scheduleRender();
+        }}
+      }});
+    }});
+  }}
 }}
 
 // -------------------------------------------------------------
@@ -3416,17 +3974,7 @@ compSearch.addEventListener('input', e => {{
 
 document.getElementById('btn-search-clear').addEventListener('click', () => {{
   compSearch.value = '';
-  searchTarget = null;
-  selectedComp = null;
-  selectedTP = null;
-  selectedNet = null;
-  document.getElementById('inspector-comp').style.display = 'none';
-  document.getElementById('inspector-tp').style.display = 'none';
-  document.getElementById('inspector-trace').style.display = 'none';
-  renderCompList();
-  renderTPList();
-  renderTraceList();
-  scheduleRender();
+  clearAllSelection();
 }});
 
 function hitTestCanvas(clientX, clientY) {{
@@ -3515,35 +4063,56 @@ function hitTestCanvas(clientX, clientY) {{
 
 let mouseDownClientX = 0;
 let mouseDownClientY = 0;
+let isPointerDown = false;
+let hoverRafId = null;
+let lastHoverX = 0;
+let lastHoverY = 0;
 
-// Canvas Interactions: Pan, Zoom & Caliper Measurement Tool
+function scheduleHoverTest(clientX, clientY) {{
+  lastHoverX = clientX;
+  lastHoverY = clientY;
+  if (!hoverRafId) {{
+    hoverRafId = requestAnimationFrame(() => {{
+      hoverRafId = null;
+      const hit = hitTestCanvas(lastHoverX, lastHoverY);
+      if (hit) {{
+        canvas.style.cursor = 'pointer';
+        canvas.title = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
+      }} else {{
+        const hitNet = hitTestTrace(lastHoverX, lastHoverY);
+        if (hitNet) {{
+          canvas.style.cursor = 'pointer';
+          canvas.title = `Trace: ${{hitNet[0]}}`;
+        }} else {{
+          canvas.style.cursor = 'default';
+          canvas.title = '';
+        }}
+      }}
+    }});
+  }}
+}}
+
+// Canvas Interactions: Pan, Zoom, Multi-Select & Caliper Measurement Tool
 canvas.addEventListener('mousedown', e => {{
   mouseDownClientX = e.clientX;
   mouseDownClientY = e.clientY;
+  isPointerDown = true;
   const mx = e.clientX * window.devicePixelRatio;
   const my = e.clientY * window.devicePixelRatio;
 
-  if (e.shiftKey) {{
-    isMeasuring = true;
-    measureP1 = toWorld(mx, my);
-    measureP2 = measureP1;
-    measureHud.style.display = 'block';
-    container.classList.add('crosshair');
+  dragStartX = mx - panX;
+  dragStartY = my - panY;
+
+  if (measureP1 && !e.shiftKey) {{
+    measureP1 = null;
+    measureP2 = null;
+    measureHud.style.display = 'none';
     scheduleRender();
-  }} else {{
-    isDragging = true;
-    dragStartX = mx - panX;
-    dragStartY = my - panY;
-    if (measureP1) {{
-      measureP1 = null;
-      measureP2 = null;
-      measureHud.style.display = 'none';
-      scheduleRender();
-    }}
   }}
 }});
 
 window.addEventListener('mouseup', () => {{
+  isPointerDown = false;
   isDragging = false;
   if (isMeasuring) {{
     isMeasuring = false;
@@ -3555,36 +4124,34 @@ canvas.addEventListener('mousemove', e => {{
   const mx = e.clientX * window.devicePixelRatio;
   const my = e.clientY * window.devicePixelRatio;
 
-  if (isDragging) {{
-    panX = mx - dragStartX;
-    panY = my - dragStartY;
-    scheduleRender();
-    return;
-  }}
-
-  if (isMeasuring) {{
-    measureP2 = toWorld(mx, my);
-    const dx = Math.abs(measureP2[0] - measureP1[0]);
-    const dy = Math.abs(measureP2[1] - measureP1[1]);
-    const dist = Math.hypot(dx, dy);
-    measureDist.textContent = `dX: ${{dx.toFixed(3)}} mm, dY: ${{dy.toFixed(3)}} mm | Dist: ${{dist.toFixed(3)}} mm`;
-    scheduleRender();
-  }} else if (!e.shiftKey) {{
-    // Fast O(1) hover hit-test
-    const hit = hitTestCanvas(e.clientX, e.clientY);
-    if (hit) {{
-      canvas.style.cursor = 'pointer';
-      canvas.title = `${{hit.item[0]}} (${{hit.type === 'tp' ? 'Test Point' : (hit.item[8] || 'Component')}})`;
-    }} else {{
-      const hitNet = hitTestTrace(e.clientX, e.clientY);
-      if (hitNet) {{
-        canvas.style.cursor = 'pointer';
-        canvas.title = `Trace: ${{hitNet[0]}}`;
+  if (isPointerDown) {{
+    const dragDist = Math.hypot(e.clientX - mouseDownClientX, e.clientY - mouseDownClientY);
+    if (dragDist > 4) {{
+      if (e.shiftKey) {{
+        // Shift + Drag: Caliper measurement
+        isMeasuring = true;
+        container.classList.add('crosshair');
+        measureHud.style.display = 'block';
+        measureP1 = toWorld(mouseDownClientX * window.devicePixelRatio, mouseDownClientY * window.devicePixelRatio);
+        measureP2 = toWorld(mx, my);
+        const dx = Math.abs(measureP2[0] - measureP1[0]);
+        const dy = Math.abs(measureP2[1] - measureP1[1]);
+        const dist = Math.hypot(dx, dy);
+        measureDist.textContent = `dX: ${{dx.toFixed(3)}} mm, dY: ${{dy.toFixed(3)}} mm | Dist: ${{dist.toFixed(3)}} mm`;
+        scheduleRender();
+        return;
       }} else {{
-        canvas.style.cursor = 'default';
-        canvas.title = '';
+        // Drag: Board Pan
+        isDragging = true;
+        panX = mx - dragStartX;
+        panY = my - dragStartY;
+        scheduleRender();
+        return;
       }}
     }}
+  }} else {{
+    // High-performance throttled hover hit-test
+    scheduleHoverTest(e.clientX, e.clientY);
   }}
 
   const [wx, wy] = toWorld(mx, my);
@@ -3594,35 +4161,41 @@ canvas.addEventListener('mousemove', e => {{
 // Canvas Direct Click Selection for Components, Test Points & Traces
 canvas.addEventListener('click', e => {{
   const dragDist = Math.hypot(e.clientX - mouseDownClientX, e.clientY - mouseDownClientY);
-  if (dragDist > 5 || isMeasuring || e.shiftKey) return;
+  if (dragDist > 5 || isMeasuring) return;
 
+  const isMulti = e.shiftKey || e.ctrlKey || e.metaKey;
   const hit = hitTestCanvas(e.clientX, e.clientY);
+
   if (hit) {{
     if (hit.type === 'tp') {{
       switchTab('tab-tps');
-      selectTestPoint(hit.item, false);
+      if (isMulti) {{
+        toggleTestPoint(hit.item);
+      }} else {{
+        selectTestPoint(hit.item, false);
+      }}
     }} else if (hit.type === 'comp') {{
       switchTab('tab-comps');
-      selectComponent(hit.item, false);
+      if (isMulti) {{
+        toggleComponent(hit.item);
+      }} else {{
+        selectComponent(hit.item, false);
+      }}
     }}
   }} else {{
     const hitNet = hitTestTrace(e.clientX, e.clientY);
     if (hitNet) {{
       switchTab('tab-traces');
-      selectTrace(hitNet, false);
+      if (isMulti) {{
+        toggleTrace(hitNet);
+      }} else {{
+        selectTrace(hitNet, false);
+      }}
     }} else {{
-      // Clicked empty board area: deselect
-      selectedComp = null;
-      selectedTP = null;
-      selectedNet = null;
-      searchTarget = null;
-      document.getElementById('inspector-comp').style.display = 'none';
-      document.getElementById('inspector-tp').style.display = 'none';
-      document.getElementById('inspector-trace').style.display = 'none';
-      renderCompList();
-      renderTPList();
-      renderTraceList();
-      scheduleRender();
+      // Clicked empty board area: deselect unless holding modifier key
+      if (!isMulti) {{
+        clearAllSelection();
+      }}
     }}
   }}
 }});
@@ -3672,18 +4245,8 @@ window.addEventListener('keydown', e => {{
     measureP1 = null;
     measureP2 = null;
     measureHud.style.display = 'none';
-    searchTarget = null;
-    selectedComp = null;
-    selectedTP = null;
-    selectedNet = null;
     compSearch.value = '';
-    document.getElementById('inspector-comp').style.display = 'none';
-    document.getElementById('inspector-tp').style.display = 'none';
-    document.getElementById('inspector-trace').style.display = 'none';
-    renderCompList();
-    renderTPList();
-    renderTraceList();
-    scheduleRender();
+    clearAllSelection();
   }}
   if (e.key === 'Shift') {{
     container.classList.add('crosshair');
